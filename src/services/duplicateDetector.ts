@@ -5,6 +5,10 @@ import { imageHash } from "image-hash";
 import { appPaths } from "../utils/filePaths.js";
 import { logger } from "../utils/logger.js";
 
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
 export type DuplicateType = "exact" | "perceptual";
 
 export interface DuplicateCheckInput {
@@ -21,36 +25,49 @@ export interface DuplicateCheckResult {
   readonly distance?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
+
+type FileCategory = DuplicateCheckInput["category"];
+
 interface StoredHashEntry {
   readonly filePath: string;
   readonly sha256: string;
   readonly perceptualHash?: string;
-  readonly category: "image" | "video" | "pdf" | "unknown";
+  readonly category: FileCategory;
   readonly createdAtIso: string;
 }
 
-interface DuplicateIndexFile {
+interface HashIndex {
   readonly version: 1;
   readonly entries: readonly StoredHashEntry[];
 }
 
-const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic"]);
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
 const PERCEPTUAL_DISTANCE_THRESHOLD = 8;
+const PERCEPTUAL_HASH_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic"]);
+const EMPTY_INDEX: HashIndex = { version: 1, entries: [] };
 
-function isSupportedImageExtension(filePath: string): boolean {
-  const ext = path.extname(filePath).toLowerCase();
-  return IMAGE_EXTENSIONS.has(ext);
+// ---------------------------------------------------------------------------
+// Hashing
+// ---------------------------------------------------------------------------
+
+function computeSha256(buffer: Buffer): string {
+  return createHash("sha256").update(buffer).digest("hex");
 }
 
-function isImageCategory(category: DuplicateCheckInput["category"]): boolean {
-  return category === "image";
+function canComputePerceptualHash(filePath: string, category: FileCategory): boolean {
+  return (
+    category === "image" &&
+    PERCEPTUAL_HASH_EXTENSIONS.has(path.extname(filePath).toLowerCase())
+  );
 }
 
-function calculateSha256(fileBuffer: Buffer): string {
-  return createHash("sha256").update(fileBuffer).digest("hex");
-}
-
-function calculateImagePerceptualHash(filePath: string): Promise<string> {
+function computePerceptualHash(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     imageHash(
       filePath,
@@ -61,224 +78,190 @@ function calculateImagePerceptualHash(filePath: string): Promise<string> {
           reject(error);
           return;
         }
-
-        if (!data || data.trim() === "") {
-          reject(new Error("imageHash returned no hash value"));
+        if (!data?.trim()) {
+          reject(new Error("imageHash returned an empty result"));
           return;
         }
-
         resolve(data.trim().toLowerCase());
       },
     );
   });
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isValidCategory(value: unknown): value is StoredHashEntry["category"] {
-  return (
-    value === "image" ||
-    value === "video" ||
-    value === "pdf" ||
-    value === "unknown"
-  );
-}
-
-function isValidStoredHashEntry(value: unknown): value is StoredHashEntry {
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  if (typeof value.filePath !== "string" || value.filePath.trim() === "") {
-    return false;
-  }
-
-  if (typeof value.sha256 !== "string" || value.sha256.trim() === "") {
-    return false;
-  }
-
-  if (
-    value.perceptualHash !== undefined &&
-    typeof value.perceptualHash !== "string"
-  ) {
-    return false;
-  }
-
-  if (!isValidCategory(value.category)) {
-    return false;
-  }
-
-  if (
-    typeof value.createdAtIso !== "string" ||
-    value.createdAtIso.trim() === ""
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-async function readDuplicateIndex(): Promise<DuplicateIndexFile> {
-  const exists = await fs.pathExists(appPaths.hashesFile);
-
-  if (!exists) {
-    return {
-      version: 1,
-      entries: [],
-    };
-  }
-
-  const raw = await fs.readJson(appPaths.hashesFile);
-
-  if (!isRecord(raw)) {
-    logger.warn(
-      { hashesFile: appPaths.hashesFile },
-      "Duplicate index file is invalid, recreating",
-    );
-
-    return {
-      version: 1,
-      entries: [],
-    };
-  }
-
-  const entriesRaw = raw.entries;
-  const entries = Array.isArray(entriesRaw)
-    ? entriesRaw.filter(isValidStoredHashEntry)
-    : [];
-
-  return {
-    version: 1,
-    entries,
-  };
-}
-
-async function writeDuplicateIndex(index: DuplicateIndexFile): Promise<void> {
-  await fs.ensureFile(appPaths.hashesFile);
-  await fs.writeJson(appPaths.hashesFile, index, { spaces: 2 });
-}
-
 function hammingDistance(a: string, b: string): number {
-  const normalizedA = a.trim().toLowerCase();
-  const normalizedB = b.trim().toLowerCase();
-
-  if (normalizedA.length !== normalizedB.length) {
-    return Number.POSITIVE_INFINITY;
-  }
-
+  if (a.length !== b.length) return Number.POSITIVE_INFINITY;
   let distance = 0;
-
-  for (let i = 0; i < normalizedA.length; i += 1) {
-    if (normalizedA[i] !== normalizedB[i]) {
-      distance += 1;
-    }
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) distance += 1;
   }
-
   return distance;
 }
 
-function findExactDuplicate(
+// ---------------------------------------------------------------------------
+// Index I/O
+// ---------------------------------------------------------------------------
+
+function isValidEntry(value: unknown): value is StoredHashEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const r = value as Record<string, unknown>;
+  return (
+    typeof r.filePath === "string" &&
+    r.filePath.length > 0 &&
+    typeof r.sha256 === "string" &&
+    r.sha256.length > 0 &&
+    (r.perceptualHash === undefined || typeof r.perceptualHash === "string") &&
+    (r.category === "image" ||
+      r.category === "video" ||
+      r.category === "pdf" ||
+      r.category === "unknown") &&
+    typeof r.createdAtIso === "string" &&
+    r.createdAtIso.length > 0
+  );
+}
+
+async function readIndex(): Promise<HashIndex> {
+  if (!(await fs.pathExists(appPaths.hashesFile))) {
+    return EMPTY_INDEX;
+  }
+
+  const raw: unknown = await fs.readJson(appPaths.hashesFile);
+
+  if (typeof raw !== "object" || raw === null) {
+    logger.warn({ path: appPaths.hashesFile }, "Hash index is corrupt — recreating");
+    return EMPTY_INDEX;
+  }
+
+  const entriesRaw = (raw as Record<string, unknown>).entries;
+  const entries = Array.isArray(entriesRaw)
+    ? entriesRaw.filter(isValidEntry)
+    : [];
+
+  return { version: 1, entries };
+}
+
+async function appendToIndex(
+  index: HashIndex,
+  entry: StoredHashEntry,
+): Promise<void> {
+  const alreadyIndexed = index.entries.some((e) => e.filePath === entry.filePath);
+  if (alreadyIndexed) return;
+
+  await fs.ensureFile(appPaths.hashesFile);
+  await fs.writeJson(
+    appPaths.hashesFile,
+    { version: 1, entries: [...index.entries, entry] },
+    { spaces: 2 },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Match finders
+// ---------------------------------------------------------------------------
+
+function findExactMatch(
   entries: readonly StoredHashEntry[],
   sha256: string,
 ): StoredHashEntry | undefined {
-  return entries.find((entry) => entry.sha256 === sha256);
+  return entries.find((e) => e.sha256 === sha256);
 }
 
-function findClosestPerceptualDuplicate(
+function findBestPerceptualMatch(
   entries: readonly StoredHashEntry[],
-  perceptualHash: string,
+  phash: string,
 ): { entry: StoredHashEntry; distance: number } | undefined {
-  let bestMatch: { entry: StoredHashEntry; distance: number } | undefined;
+  let best: { entry: StoredHashEntry; distance: number } | undefined;
 
   for (const entry of entries) {
-    if (!entry.perceptualHash) {
-      continue;
-    }
-
-    const distance = hammingDistance(perceptualHash, entry.perceptualHash);
-
-    if (distance > PERCEPTUAL_DISTANCE_THRESHOLD) {
-      continue;
-    }
-
-    if (!bestMatch || distance < bestMatch.distance) {
-      bestMatch = { entry, distance };
+    if (!entry.perceptualHash) continue;
+    const distance = hammingDistance(phash, entry.perceptualHash);
+    if (
+      distance <= PERCEPTUAL_DISTANCE_THRESHOLD &&
+      (!best || distance < best.distance)
+    ) {
+      best = { entry, distance };
     }
   }
 
-  return bestMatch;
+  return best;
 }
 
-function buildStoredHashEntry(input: {
-  filePath: string;
-  sha256: string;
-  perceptualHash?: string;
-  category: StoredHashEntry["category"];
-}): StoredHashEntry {
-  return {
-    filePath: input.filePath,
-    sha256: input.sha256,
-    ...(input.perceptualHash !== undefined
-      ? { perceptualHash: input.perceptualHash }
-      : {}),
-    category: input.category,
-    createdAtIso: new Date().toISOString(),
-  };
-}
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 export async function detectDuplicate(
   input: DuplicateCheckInput,
 ): Promise<DuplicateCheckResult> {
-  const fileBuffer = await fs.readFile(input.filePath);
-  const sha256 = calculateSha256(fileBuffer);
+  const buffer = await fs.readFile(input.filePath);
+  const sha256 = computeSha256(buffer);
+  const index = await readIndex();
 
-  const index = await readDuplicateIndex();
+  // --- 1. Exact duplicate (SHA-256) ---
 
-  const exactMatch = findExactDuplicate(index.entries, sha256);
-
-  let perceptualHash: string | undefined;
-
-  const canUsePerceptualHash =
-    isImageCategory(input.category) &&
-    isSupportedImageExtension(input.filePath);
-
-  if (!exactMatch && canUsePerceptualHash) {
-    try {
-      perceptualHash = await calculateImagePerceptualHash(input.filePath);
-    } catch (error) {
-      logger.warn(
-        {
-          filePath: input.filePath,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        "Failed to calculate perceptual hash",
-      );
-    }
-  }
-
-  let result: DuplicateCheckResult;
+  const exactMatch = findExactMatch(index.entries, sha256);
 
   if (exactMatch) {
-    result = {
+    await appendToIndex(index, {
+      filePath: input.filePath,
+      sha256,
+      category: input.category,
+      createdAtIso: new Date().toISOString(),
+    });
+
+    logger.debug(
+      { filePath: input.filePath, matchedFilePath: exactMatch.filePath },
+      "Exact duplicate detected",
+    );
+
+    return {
       isDuplicate: true,
       duplicateType: "exact",
       matchedFilePath: exactMatch.filePath,
       sha256,
     };
-  } else if (perceptualHash) {
-    const imageEntries = index.entries.filter(
-      (entry) => entry.category === "image",
-    );
+  }
 
-    const perceptualMatch = findClosestPerceptualDuplicate(
-      imageEntries,
-      perceptualHash,
-    );
+  // --- 2. Perceptual duplicate (image-hash + Hamming distance) ---
+
+  let perceptualHash: string | undefined;
+
+  if (canComputePerceptualHash(input.filePath, input.category)) {
+    try {
+      perceptualHash = await computePerceptualHash(input.filePath);
+    } catch (error: unknown) {
+      logger.warn(
+        {
+          filePath: input.filePath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Perceptual hash computation failed — skipping similarity check",
+      );
+    }
+  }
+
+  // Store the new entry (once, regardless of outcome below)
+  await appendToIndex(index, {
+    filePath: input.filePath,
+    sha256,
+    ...(perceptualHash !== undefined ? { perceptualHash } : {}),
+    category: input.category,
+    createdAtIso: new Date().toISOString(),
+  });
+
+  if (perceptualHash !== undefined) {
+    const perceptualMatch = findBestPerceptualMatch(index.entries, perceptualHash);
 
     if (perceptualMatch) {
-      result = {
+      logger.debug(
+        {
+          filePath: input.filePath,
+          matchedFilePath: perceptualMatch.entry.filePath,
+          distance: perceptualMatch.distance,
+        },
+        "Perceptual duplicate detected",
+      );
+
+      return {
         isDuplicate: true,
         duplicateType: "perceptual",
         matchedFilePath: perceptualMatch.entry.filePath,
@@ -286,49 +269,12 @@ export async function detectDuplicate(
         perceptualHash,
         distance: perceptualMatch.distance,
       };
-    } else {
-      result = {
-        isDuplicate: false,
-        sha256,
-        perceptualHash,
-      };
     }
-  } else {
-    result = {
-      isDuplicate: false,
-      sha256,
-    };
+
+    return { isDuplicate: false, sha256, perceptualHash };
   }
 
-  const alreadyStoredByPath = index.entries.some(
-    (entry) => entry.filePath === input.filePath,
-  );
+  // --- 3. No duplicate ---
 
-  if (!alreadyStoredByPath) {
-    const nextEntry = buildStoredHashEntry({
-      filePath: input.filePath,
-      sha256,
-      ...(perceptualHash !== undefined ? { perceptualHash } : {}),
-      category: input.category,
-    });
-
-    await writeDuplicateIndex({
-      version: 1,
-      entries: [...index.entries, nextEntry],
-    });
-  }
-
-  logger.debug(
-    {
-      filePath: input.filePath,
-      category: input.category,
-      isDuplicate: result.isDuplicate,
-      duplicateType: result.duplicateType,
-      matchedFilePath: result.matchedFilePath,
-      distance: result.distance,
-    },
-    "Duplicate detection completed",
-  );
-
-  return result;
+  return { isDuplicate: false, sha256 };
 }

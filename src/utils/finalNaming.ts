@@ -5,17 +5,24 @@ import { appleMessageDateToDate } from "./date.js";
 import type { SupportedFileCategory } from "./fileType.js";
 import type { ProjectPhase } from "./projectFolders.js";
 
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
 export interface FinalNamingResult {
   readonly rootFolder: "Photos" | "Videos" | "Renders" | "Final";
   readonly phaseFolder?: ProjectPhase;
   readonly fileName: string;
 }
 
+// ---------------------------------------------------------------------------
+// Date / initials
+// ---------------------------------------------------------------------------
+
 function formatDate(date: Date): string {
   const mm = String(date.getMonth() + 1).padStart(2, "0");
   const dd = String(date.getDate()).padStart(2, "0");
   const yy = String(date.getFullYear()).slice(-2);
-
   return `${mm}-${dd}-${yy}`;
 }
 
@@ -25,33 +32,30 @@ function resolveInitials(row: RawAttachmentRow): string {
   }
 
   const source = row.handleId?.trim();
-
-  if (!source) {
-    return "UK";
-  }
+  if (!source) return "UK";
 
   const letters = source.replace(/[^a-zA-Z]/g, "").toUpperCase();
-
-  if (letters.length >= 2) {
-    return letters.slice(0, 2);
-  }
-
-  return "UK";
+  return letters.length >= 2 ? letters.slice(0, 2) : "UK";
 }
 
 function resolveDate(row: RawAttachmentRow): string {
   const parsed = appleMessageDateToDate(row.messageDate);
-
-  if (parsed) {
-    return formatDate(parsed);
-  }
-
-  return formatDate(new Date());
+  return formatDate(parsed ?? new Date());
 }
 
+// ---------------------------------------------------------------------------
+// Description normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Splits a string into PascalCase words:
+ *   "ShowerheadWallPatch" → ["Showerhead", "Wall", "Patch"]
+ *   "Framing_progress"   → ["Framing", "Progress"]
+ *   "chat1644msg-att"    → filtered out by isGarbageToken
+ */
 function normalizeWords(value: string): string[] {
   return value
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // split camelCase
     .replace(/[_-]+/g, " ")
     .replace(/[^a-zA-Z0-9\s]/g, " ")
     .trim()
@@ -62,7 +66,6 @@ function normalizeWords(value: string): string[] {
 
 function isGarbageToken(value: string): boolean {
   const lowered = value.toLowerCase();
-
   return (
     lowered.startsWith("chat") ||
     lowered.startsWith("msg") ||
@@ -71,59 +74,83 @@ function isGarbageToken(value: string): boolean {
   );
 }
 
-function normalizeDescription(
-  description: string | null | undefined,
-): string | null {
-  if (!description) {
-    return null;
-  }
+/**
+ * Normalizes a raw description string into underscore-separated PascalCase
+ * tokens with garbage removed. Returns null if nothing useful remains.
+ *
+ * "ShowerheadWallPatch" → "Showerhead_Wall_Patch"
+ * "chat1644msg"         → null
+ */
+function normalizeDescription(description: string | null): string | null {
+  if (!description) return null;
 
   const words = normalizeWords(description).filter(
     (word) => !isGarbageToken(word),
   );
 
-  if (words.length === 0) {
-    return null;
-  }
-
-  return words.join("_");
+  return words.length > 0 ? words.join("_") : null;
 }
 
-function resolveLocation(classification: ClassificationResult): string | null {
-  const normalizedDescription = normalizeDescription(
-    classification.description,
-  );
+// ---------------------------------------------------------------------------
+// Location + remainder split
+// ---------------------------------------------------------------------------
 
-  if (!normalizedDescription) {
-    return null;
+/**
+ * Splits a normalized description into a location token (first word) and an
+ * optional remainder (the rest).
+ *
+ * "Showerhead_Wall_Patch" → { location: "Showerhead", remainder: "Wall_Patch" }
+ * "Framing"               → { location: "Framing",    remainder: null }
+ *
+ * Keeping these together eliminates the double-word bug that occurs when
+ * location and the full description are derived independently.
+ */
+function splitDescriptionParts(normalized: string): {
+  location: string;
+  remainder: string | null;
+} {
+  const underscoreIndex = normalized.indexOf("_");
+
+  if (underscoreIndex === -1) {
+    // Single token — it is only the location; there is no remainder.
+    return { location: normalized, remainder: null };
   }
 
-  const firstWord = normalizedDescription.split("_")[0];
-
-  return firstWord ?? null;
+  return {
+    location: normalized.slice(0, underscoreIndex),
+    remainder: normalized.slice(underscoreIndex + 1),
+  };
 }
 
-function resolveRootFolder(params: {
-  category: SupportedFileCategory;
-  classification: ClassificationResult;
-}): "Photos" | "Videos" | "Renders" | "Final" {
-  if (params.category === "video") {
-    return "Videos";
-  }
+// ---------------------------------------------------------------------------
+// Folder resolution
+// ---------------------------------------------------------------------------
 
-  return params.classification.folderHint;
+function resolveRootFolder(
+  category: SupportedFileCategory,
+  classification: ClassificationResult,
+): "Photos" | "Videos" | "Renders" | "Final" {
+  if (category === "video") return "Videos";
+  return classification.folderHint;
 }
 
-function resolvePhaseFolder(params: {
-  rootFolder: "Photos" | "Videos" | "Renders" | "Final";
-  classification: ClassificationResult;
-}): ProjectPhase | undefined {
-  if (params.rootFolder === "Photos" || params.rootFolder === "Videos") {
-    return params.classification.phase;
+/**
+ * Phase is only meaningful under Photos and Videos.
+ * For Renders and Final the property must be absent (exactOptionalPropertyTypes).
+ */
+function resolvePhaseFolder(
+  rootFolder: "Photos" | "Videos" | "Renders" | "Final",
+  classification: ClassificationResult,
+): ProjectPhase | undefined {
+  if (rootFolder === "Photos" || rootFolder === "Videos") {
+    return classification.phase;
   }
-
   return undefined;
 }
+
+// ---------------------------------------------------------------------------
+// Public builder
+// ---------------------------------------------------------------------------
 
 export function buildFinalNaming(params: {
   row: RawAttachmentRow;
@@ -135,37 +162,24 @@ export function buildFinalNaming(params: {
 
   const initials = resolveInitials(params.row);
   const date = resolveDate(params.row);
-  const location = resolveLocation(params.classification);
-  const description = normalizeDescription(params.classification.description);
 
+  const normalized = normalizeDescription(params.classification.description);
+
+  // Build the [Initials]_[MM-DD-YY]_[Location]_[Description] segments.
   let fileName = `${initials}_${date}`;
 
-  if (location) {
+  if (normalized !== null) {
+    const { location, remainder } = splitDescriptionParts(normalized);
     fileName += `_${location}`;
-  }
-
-  if (description) {
-    const descriptionWithoutLocation =
-      location && description.startsWith(`${location}_`)
-        ? description.slice(location.length + 1)
-        : description;
-
-    if (descriptionWithoutLocation) {
-      fileName += `_${descriptionWithoutLocation}`;
+    if (remainder !== null) {
+      fileName += `_${remainder}`;
     }
   }
 
   fileName += ext;
 
-  const rootFolder = resolveRootFolder({
-    category: params.category,
-    classification: params.classification,
-  });
-
-  const phaseFolder = resolvePhaseFolder({
-    rootFolder,
-    classification: params.classification,
-  });
+  const rootFolder = resolveRootFolder(params.category, params.classification);
+  const phaseFolder = resolvePhaseFolder(rootFolder, params.classification);
 
   return {
     rootFolder,

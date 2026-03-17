@@ -8,5 +8,7 @@ export const appPaths = {
   tempIncoming: path.join(os.tmpdir(), "imessage-ai-archiver", "incoming"),
   stateFile: path.join(env.APP_STORAGE_ROOT, ".imessage-archiver-state.json"),
   weeklyReportDir: path.join(process.cwd(), "reports"),
+  logsDir: path.join(env.APP_STORAGE_ROOT, "logs"),
   processedLogFile: path.join(env.APP_STORAGE_ROOT, "logs", "processed.jsonl"),
+  duplicatesDir: path.join(env.APP_STORAGE_ROOT, "duplicates"),
 } as const;

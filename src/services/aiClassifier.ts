@@ -8,49 +8,61 @@ import type { SupportedFileCategory } from "../utils/fileType.js";
 import { logger } from "../utils/logger.js";
 import { optimizeImageForAI, cleanupAiPreview } from "./aiMediaPreview.js";
 
+// ---------------------------------------------------------------------------
+// Schemas
+// ---------------------------------------------------------------------------
+
 const folderHintSchema = z.enum(["Photos", "Renders", "Final"]);
 const phaseSchema = z.enum(PROJECT_PHASES);
 
-const classificationSchema = z.object({
+const aiResponseSchema = z.object({
   phase: phaseSchema,
   folderHint: folderHintSchema,
   description: z.string().min(1),
   confidence: z.number().min(0).max(1),
 });
 
-export type ClassificationResult = z.infer<typeof classificationSchema>;
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+export type ClassificationSource =
+  | "ai"
+  | "video-fallback"
+  | "pdf-fallback"
+  | "default-fallback";
+
+export type ClassificationResult = z.infer<typeof aiResponseSchema> & {
+  readonly classificationSource: ClassificationSource;
+};
+
+// ---------------------------------------------------------------------------
+// OpenAI client (lazy singleton)
+// ---------------------------------------------------------------------------
 
 let client: OpenAI | null = null;
 
 type UserContentItem =
   | { type: "input_text"; text: string }
-  | {
-      type: "input_image";
-      image_url: string;
-      detail: "auto" | "low" | "high";
-    };
+  | { type: "input_image"; image_url: string; detail: "auto" | "low" | "high" };
 
 function getClient(): OpenAI {
   if (!env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
-
   if (!client) {
     client = new OpenAI({ apiKey: env.OPENAI_API_KEY });
   }
-
   return client;
 }
 
+// ---------------------------------------------------------------------------
+// Fallback helpers
+// ---------------------------------------------------------------------------
+
 function buildFallbackDescription(category: SupportedFileCategory): string {
-  if (category === "video") {
-    return "SiteWalkVideo";
-  }
-
-  if (category === "pdf") {
-    return "Document";
-  }
-
+  if (category === "video") return "SiteWalkVideo";
+  if (category === "pdf") return "Document";
   return "ProgressPhoto";
 }
 
@@ -117,10 +129,16 @@ function detectFolderHintFromText(
   return "Photos";
 }
 
+function resolveFallbackSource(category: SupportedFileCategory): ClassificationSource {
+  if (category === "video") return "video-fallback";
+  if (category === "pdf") return "pdf-fallback";
+  return "default-fallback";
+}
+
 function buildFallbackClassification(params: {
   category: SupportedFileCategory;
-  messageText?: string | null | undefined;
-  originalFilename?: string | null | undefined;
+  messageText?: string | null;
+  originalFilename?: string | null;
 }): ClassificationResult {
   const context = [
     params.messageText ?? "",
@@ -132,8 +150,13 @@ function buildFallbackClassification(params: {
     folderHint: detectFolderHintFromText(context),
     description: buildFallbackDescription(params.category),
     confidence: 0.2,
+    classificationSource: resolveFallbackSource(params.category),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Main classifier
+// ---------------------------------------------------------------------------
 
 export async function classifyAttachment(params: {
   filePath: string;
@@ -152,13 +175,13 @@ export async function classifyAttachment(params: {
       : {}),
   });
 
+  if (!env.OPENAI_API_KEY) {
+    return fallback;
+  }
+
   let aiImagePath: string | null = null;
 
   try {
-    if (!env.OPENAI_API_KEY) {
-      return fallback;
-    }
-
     const openai = getClient();
 
     const userContent: UserContentItem[] = [
@@ -247,30 +270,16 @@ export async function classifyAttachment(params: {
 
     const rawText = response.output_text;
 
-    logger.info(
-      {
-        filePath: params.filePath,
-        rawText,
-      },
-      "Raw AI response text",
-    );
+    logger.info({ filePath: params.filePath, rawText }, "Raw AI response text");
 
-    const parsed = JSON.parse(rawText) as unknown;
+    const parsed: unknown = JSON.parse(rawText);
+    const aiResult = aiResponseSchema.parse(parsed);
+    const result: ClassificationResult = {
+      ...aiResult,
+      classificationSource: "ai",
+    };
 
-    logger.info(
-      {
-        filePath: params.filePath,
-        parsed,
-      },
-      "Parsed AI response object",
-    );
-
-    const result = classificationSchema.parse(parsed);
-
-    logger.info(
-      { filePath: params.filePath, result },
-      "AI classification completed",
-    );
+    logger.info({ filePath: params.filePath, result }, "AI classification completed");
 
     return result;
   } catch (error: unknown) {
