@@ -1,6 +1,24 @@
 import fs from "fs-extra";
 import * as path from "node:path";
 
+async function getUniqueDestinationPath(
+  targetDirectory: string,
+  fileName: string,
+): Promise<string> {
+  const ext = path.extname(fileName);
+  const base = path.basename(fileName, ext);
+
+  let candidate = path.join(targetDirectory, fileName);
+  let counter = 2;
+
+  while (await fs.pathExists(candidate)) {
+    candidate = path.join(targetDirectory, `${base}_${counter}${ext}`);
+    counter += 1;
+  }
+
+  return candidate;
+}
+
 export async function moveToDirectory(
   sourcePath: string,
   targetDirectory: string,
@@ -9,9 +27,12 @@ export async function moveToDirectory(
   await fs.ensureDir(targetDirectory);
 
   const fileName = targetFileName ?? path.basename(sourcePath);
-  const destinationPath = path.join(targetDirectory, fileName);
+  const destinationPath = await getUniqueDestinationPath(
+    targetDirectory,
+    fileName,
+  );
 
-  await fs.move(sourcePath, destinationPath, { overwrite: true });
+  await fs.move(sourcePath, destinationPath, { overwrite: false });
 
   return destinationPath;
 }

@@ -1,9 +1,9 @@
 import fs from "fs-extra";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
 import { appPaths } from "../utils/filePaths.js";
-import { logger } from "../utils/logger.js";
 import { buildTemporaryFileName } from "../utils/fileName.js";
+import { logger } from "../utils/logger.js";
 import type { RawAttachmentRow } from "./pollMessages.js";
 
 export interface ExtractedAttachment {
@@ -15,7 +15,6 @@ export interface ExtractedAttachment {
 function normalizeAppleAttachmentPath(inputPath: string): string {
   let normalizedPath = inputPath.replace(/^file:\/\//, "");
 
-  // Expand "~/" into the current user's home directory.
   if (normalizedPath.startsWith("~/")) {
     normalizedPath = path.join(os.homedir(), normalizedPath.slice(2));
   }
@@ -37,7 +36,7 @@ export async function extractAttachment(
 
   const sourcePath = normalizeAppleAttachmentPath(row.attachmentFilename);
   const fileName = buildTemporaryFileName(row);
-  const destinationPath = path.join(appPaths.incoming, fileName);
+  const destinationPath = path.join(appPaths.tempIncoming, fileName);
 
   logger.info({ sourcePath }, "Normalized attachment source path");
 
@@ -50,13 +49,16 @@ export async function extractAttachment(
     return null;
   }
 
-  await fs.ensureDir(appPaths.incoming);
+  await fs.ensureDir(appPaths.tempIncoming);
 
   logger.info({ sourcePath, destinationPath }, "About to copy attachment");
 
   await fs.copy(sourcePath, destinationPath, { overwrite: true });
 
-  logger.info({ destinationPath }, "Attachment copied into incoming directory");
+  logger.info(
+    { destinationPath },
+    "Attachment copied into temporary directory",
+  );
 
   return {
     sourcePath,

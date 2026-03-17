@@ -1,16 +1,21 @@
 import * as path from "node:path";
 import type { ClassificationResult } from "../services/aiClassifier.js";
 import type { RawAttachmentRow } from "../services/pollMessages.js";
-import { formatDateForFile, appleMessageDateToDate } from "./date.js";
-import { sanitizeFileBaseName, sanitizePathSegment } from "./sanitize.js";
+import { appleMessageDateToDate } from "./date.js";
 import type { SupportedFileCategory } from "./fileType.js";
 
 export interface FinalNamingResult {
-  projectFolder: string;
+  rootFolder: "Photos" | "Videos" | "Renders" | "Final";
   phaseFolder: string;
-  typeFolder: string;
   fileName: string;
-  usedFallback: boolean;
+}
+
+function formatDate(date: Date): string {
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const yy = String(date.getFullYear()).slice(-2);
+
+  return `${mm}-${dd}-${yy}`;
 }
 
 function resolveInitials(row: RawAttachmentRow): string {
@@ -19,11 +24,13 @@ function resolveInitials(row: RawAttachmentRow): string {
   }
 
   const source = row.handleId?.trim();
+
   if (!source) {
     return "UK";
   }
 
   const letters = source.replace(/[^a-zA-Z]/g, "").toUpperCase();
+
   if (letters.length >= 2) {
     return letters.slice(0, 2);
   }
@@ -31,66 +38,108 @@ function resolveInitials(row: RawAttachmentRow): string {
   return "UK";
 }
 
-function resolveDateString(row: RawAttachmentRow): string {
+function resolveDate(row: RawAttachmentRow): string {
   const parsed = appleMessageDateToDate(row.messageDate);
+
   if (parsed) {
-    return formatDateForFile(parsed);
+    return formatDate(parsed);
   }
 
-  return formatDateForFile(new Date());
+  return formatDate(new Date());
 }
 
-function resolveTypeFolder(category: SupportedFileCategory): string {
-  switch (category) {
-    case "image":
-      return "images";
-    case "pdf":
-      return "pdfs";
-    case "video":
-      return "videos";
-    default:
-      return "unknown";
-  }
+function normalizeWords(value: string): string[] {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/[^a-zA-Z0-9\s]/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
 }
 
-export function buildFinalNaming(
-  row: RawAttachmentRow,
-  category: SupportedFileCategory,
-  classification: ClassificationResult | null,
-  originalPath: string,
-): FinalNamingResult {
-  const ext = path.extname(originalPath).toLowerCase();
-  const initials = resolveInitials(row);
-  const dateString = resolveDateString(row);
-  const typeFolder = resolveTypeFolder(category);
+function isGarbageToken(value: string): boolean {
+  const lowered = value.toLowerCase();
 
-  if (!classification || classification.confidence < 0.45) {
-    const fallbackBase = sanitizeFileBaseName(
-      `${initials}_${dateString}_chat-${row.chatId}_msg-${row.messageRowId}_${category}`,
-    );
+  return (
+    lowered.startsWith("chat") ||
+    lowered.startsWith("msg") ||
+    lowered.startsWith("att") ||
+    /\d{4,}/.test(lowered)
+  );
+}
 
-    return {
-      projectFolder: "unsorted",
-      phaseFolder: "needs-review",
-      typeFolder,
-      fileName: `${fallbackBase}${ext}`,
-      usedFallback: true,
-    };
+function normalizeDescription(
+  description: string | null | undefined,
+): string | null {
+  if (!description) {
+    return null;
   }
 
-  const projectFolder = sanitizePathSegment(classification.projectName);
-  const phaseFolder = sanitizePathSegment(classification.phase);
-  const description = sanitizeFileBaseName(classification.description);
-
-  const fileBase = sanitizeFileBaseName(
-    `${initials}_${dateString}_${projectFolder}_${description}`,
+  const words = normalizeWords(description).filter(
+    (word) => !isGarbageToken(word),
   );
 
+  if (words.length === 0) {
+    return null;
+  }
+
+  return words.join("_");
+}
+
+function resolveLocation(classification: ClassificationResult): string | null {
+  const normalizedDescription = normalizeDescription(
+    classification.description,
+  );
+
+  if (!normalizedDescription) {
+    return null;
+  }
+
+  const firstWord = normalizedDescription.split("_")[0];
+
+  return firstWord ?? null;
+}
+
+export function buildFinalNaming(params: {
+  row: RawAttachmentRow;
+  category: SupportedFileCategory;
+  classification: ClassificationResult;
+  originalPath: string;
+}): FinalNamingResult {
+  const ext = path.extname(params.originalPath).toLowerCase();
+
+  const initials = resolveInitials(params.row);
+  const date = resolveDate(params.row);
+  const location = resolveLocation(params.classification);
+  const description = normalizeDescription(params.classification.description);
+
+  let fileName = `${initials}_${date}`;
+
+  if (location) {
+    fileName += `_${location}`;
+  }
+
+  if (description) {
+    const descriptionWithoutLocation =
+      location && description.startsWith(`${location}_`)
+        ? description.slice(location.length + 1)
+        : description;
+
+    if (descriptionWithoutLocation) {
+      fileName += `_${descriptionWithoutLocation}`;
+    }
+  }
+
+  fileName += ext;
+
+  const rootFolder =
+    params.category === "video" ? "Videos" : params.classification.folderHint;
+
   return {
-    projectFolder,
-    phaseFolder,
-    typeFolder,
-    fileName: `${fileBase}${ext}`,
-    usedFallback: false,
+    rootFolder,
+    phaseFolder: params.classification.phase,
+    fileName,
   };
 }

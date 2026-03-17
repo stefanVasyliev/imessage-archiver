@@ -13,6 +13,28 @@ export interface RawAttachmentRow {
   attachmentMimeType: string | null;
   handleId: string | null;
   chatId: number;
+  chatDisplayName: string | null;
+  projectName: string | null;
+}
+
+function extractProjectName(chatDisplayName: string | null): string | null {
+  if (!chatDisplayName) {
+    return null;
+  }
+
+  const chatName = chatDisplayName.trim();
+  const prefix = env.TARGET_CHAT_PREFIX.trim();
+
+  if (!chatName.toLowerCase().startsWith(prefix.toLowerCase())) {
+    return null;
+  }
+
+  const rawProjectName = chatName
+    .slice(prefix.length)
+    .replace(/^[:\-\s]+/, "")
+    .trim();
+
+  return rawProjectName.length > 0 ? rawProjectName : null;
 }
 
 export function getNewAttachmentRows(
@@ -30,8 +52,11 @@ export function getNewAttachmentRows(
       a.filename AS attachmentFilename,
       a.mime_type AS attachmentMimeType,
       h.id AS handleId,
-      cmj.chat_id AS chatId
+      c.ROWID AS chatId,
+      c.display_name AS chatDisplayName
     FROM chat_message_join AS cmj
+    INNER JOIN chat AS c
+      ON c.ROWID = cmj.chat_id
     INNER JOIN message AS m
       ON m.ROWID = cmj.message_id
     LEFT JOIN handle AS h
@@ -40,24 +65,35 @@ export function getNewAttachmentRows(
       ON maj.message_id = m.ROWID
     LEFT JOIN attachment AS a
       ON a.ROWID = maj.attachment_id
-    WHERE cmj.chat_id = ?
-      AND m.ROWID > ?
+    WHERE
+      m.ROWID > ?
       AND a.filename IS NOT NULL
+      AND c.display_name IS NOT NULL
+      AND c.display_name LIKE ?
     ORDER BY m.ROWID ASC
   `);
 
-  const rows = query.all(
-    env.TARGET_CHAT_ID,
+  const chatPrefixPattern = `${env.TARGET_CHAT_PREFIX}%`;
+
+  const rawRows = query.all(
     lastProcessedMessageRowId,
-  ) as RawAttachmentRow[];
+    chatPrefixPattern,
+  ) as Array<Omit<RawAttachmentRow, "projectName">>;
+
+  const rows: RawAttachmentRow[] = rawRows
+    .map((row) => ({
+      ...row,
+      projectName: extractProjectName(row.chatDisplayName),
+    }))
+    .filter((row) => row.projectName !== null);
 
   logger.debug(
     {
-      targetChatId: env.TARGET_CHAT_ID,
+      targetChatPrefix: env.TARGET_CHAT_PREFIX,
       lastProcessedMessageRowId,
       count: rows.length,
     },
-    "Fetched new attachment rows for target chat",
+    "Fetched new attachment rows for AIC chats",
   );
 
   return rows;

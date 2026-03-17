@@ -7,12 +7,10 @@ const envSchema = z.object({
   MESSAGES_DB_PATH: z.string().min(1),
   APP_STORAGE_ROOT: z.string().min(1),
   POLL_INTERVAL_SECONDS: z.coerce.number().int().positive().default(15),
-  TARGET_CHAT_ID: z.coerce.number().int().positive(),
-  TARGET_CHAT_IDENTIFIER: z.string().optional(),
+  TARGET_CHAT_PREFIX: z.string().min(1).default("AIC"),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace"])
     .default("info"),
-
   REPORT_EMAIL_TO: z.string().optional(),
   REPORT_EMAIL_FROM: z.string().optional(),
   SMTP_HOST: z.string().optional(),
@@ -24,5 +22,3 @@ const envSchema = z.object({
 });
 
 export const env = envSchema.parse(process.env);
-
-console.log("OPENAI KEY LOADED:", env.OPENAI_API_KEY?.slice(0,10));
