@@ -4,6 +4,7 @@ import { z } from "zod";
 loadEnv();
 
 const envSchema = z.object({
+  RESEND_API_KEY: z.string().min(1),
   MESSAGES_DB_PATH: z.string().min(1),
   APP_STORAGE_ROOT: z.string().min(1),
   POLL_INTERVAL_SECONDS: z.coerce.number().int().positive().default(15),

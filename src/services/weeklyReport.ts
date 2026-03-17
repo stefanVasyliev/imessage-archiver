@@ -1,38 +1,79 @@
 import fs from "fs-extra";
 import * as path from "node:path";
-import cron from "node-cron";
-import { appPaths } from "../utils/filePaths.js";
-import { logger } from "../utils/logger.js";
+import type { ProcessedFileEvent } from "./metadataLog.js";
 
-export async function generateWeeklyReport(): Promise<string> {
-  await fs.ensureDir(appPaths.weeklyReportDir);
-
-  const reportPath = path.join(
-    appPaths.weeklyReportDir,
-    `weekly-report-${new Date().toISOString().slice(0, 10)}.json`,
-  );
-
-  const report = {
-    generatedAt: new Date().toISOString(),
-    note: "This is an MVP weekly report. More detailed summaries will be added later.",
+export interface WeeklyReportResult {
+  readonly summary: {
+    readonly total: number;
+    readonly duplicates: number;
   };
-
-  await fs.writeJson(reportPath, report, { spaces: 2 });
-
-  logger.info({ reportPath }, "Weekly report generated");
-
-  return reportPath;
+  readonly byProject: readonly {
+    readonly projectName: string;
+    readonly total: number;
+  }[];
 }
 
-export function scheduleWeeklyReport(): void {
-  /**
-   * Every Monday at 08:00 local time.
-   */
-  cron.schedule("0 8 * * 1", async () => {
-    try {
-      await generateWeeklyReport();
-    } catch (error) {
-      logger.error({ error }, "Failed to generate weekly report");
-    }
-  });
+export async function generateWeeklyReport(
+  filePath: string,
+): Promise<WeeklyReportResult> {
+  await fs.ensureDir(path.dirname(filePath));
+
+  const exists = await fs.pathExists(filePath);
+
+  if (!exists) {
+    return {
+      summary: {
+        total: 0,
+        duplicates: 0,
+      },
+      byProject: [],
+    };
+  }
+
+  const content = await fs.readFile(filePath, "utf8");
+
+  const lines = content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return {
+      summary: {
+        total: 0,
+        duplicates: 0,
+      },
+      byProject: [],
+    };
+  }
+
+  const events: ProcessedFileEvent[] = lines.map((line) =>
+    JSON.parse(line),
+  ) as ProcessedFileEvent[];
+
+  const summary = {
+    total: events.length,
+    duplicates: events.filter((event) => event.isDuplicate).length,
+  };
+
+  const byProjectMap = new Map<string, number>();
+
+  for (const event of events) {
+    byProjectMap.set(
+      event.projectName,
+      (byProjectMap.get(event.projectName) ?? 0) + 1,
+    );
+  }
+
+  const byProject = Array.from(byProjectMap.entries()).map(
+    ([projectName, total]) => ({
+      projectName,
+      total,
+    }),
+  );
+
+  return {
+    summary,
+    byProject,
+  };
 }

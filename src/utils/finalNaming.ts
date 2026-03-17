@@ -3,11 +3,12 @@ import type { ClassificationResult } from "../services/aiClassifier.js";
 import type { RawAttachmentRow } from "../services/pollMessages.js";
 import { appleMessageDateToDate } from "./date.js";
 import type { SupportedFileCategory } from "./fileType.js";
+import type { ProjectPhase } from "./projectFolders.js";
 
 export interface FinalNamingResult {
-  rootFolder: "Photos" | "Videos" | "Renders" | "Final";
-  phaseFolder: string;
-  fileName: string;
+  readonly rootFolder: "Photos" | "Videos" | "Renders" | "Final";
+  readonly phaseFolder?: ProjectPhase;
+  readonly fileName: string;
 }
 
 function formatDate(date: Date): string {
@@ -102,6 +103,28 @@ function resolveLocation(classification: ClassificationResult): string | null {
   return firstWord ?? null;
 }
 
+function resolveRootFolder(params: {
+  category: SupportedFileCategory;
+  classification: ClassificationResult;
+}): "Photos" | "Videos" | "Renders" | "Final" {
+  if (params.category === "video") {
+    return "Videos";
+  }
+
+  return params.classification.folderHint;
+}
+
+function resolvePhaseFolder(params: {
+  rootFolder: "Photos" | "Videos" | "Renders" | "Final";
+  classification: ClassificationResult;
+}): ProjectPhase | undefined {
+  if (params.rootFolder === "Photos" || params.rootFolder === "Videos") {
+    return params.classification.phase;
+  }
+
+  return undefined;
+}
+
 export function buildFinalNaming(params: {
   row: RawAttachmentRow;
   category: SupportedFileCategory;
@@ -134,12 +157,19 @@ export function buildFinalNaming(params: {
 
   fileName += ext;
 
-  const rootFolder =
-    params.category === "video" ? "Videos" : params.classification.folderHint;
+  const rootFolder = resolveRootFolder({
+    category: params.category,
+    classification: params.classification,
+  });
+
+  const phaseFolder = resolvePhaseFolder({
+    rootFolder,
+    classification: params.classification,
+  });
 
   return {
     rootFolder,
-    phaseFolder: params.classification.phase,
+    ...(phaseFolder !== undefined ? { phaseFolder } : {}),
     fileName,
   };
 }
