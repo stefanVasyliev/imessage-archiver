@@ -17,7 +17,7 @@
     "inspect:chat": "tsx src/scripts/inspectChat.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^12.8.0",
     "dotenv": "^17.3.1",
     "fs-extra": "^11.3.4",
     "image-hash": "^7.0.1",

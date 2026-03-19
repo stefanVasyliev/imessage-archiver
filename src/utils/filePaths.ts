@@ -10,5 +10,9 @@ export const appPaths = {
   weeklyReportDir: path.join(process.cwd(), "reports"),
   logsDir: path.join(env.APP_STORAGE_ROOT, "logs"),
   processedLogFile: path.join(env.APP_STORAGE_ROOT, "logs", "processed.jsonl"),
+  activityLogFile: path.join(env.APP_STORAGE_ROOT, "logs", "activity.jsonl"),
+  messageLogFile: path.join(env.APP_STORAGE_ROOT, "logs", "messages.jsonl"),
+  reportLogFile: path.join(env.APP_STORAGE_ROOT, "logs", "reports.jsonl"),
   duplicatesDir: path.join(env.APP_STORAGE_ROOT, "duplicates"),
+  manualReviewDir: path.join(env.APP_STORAGE_ROOT, "ManualReview"),
 } as const;

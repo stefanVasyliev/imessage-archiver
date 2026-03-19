@@ -6,7 +6,11 @@ import { env } from "../config/env.js";
 import { PROJECT_PHASES } from "../utils/projectFolders.js";
 import type { SupportedFileCategory } from "../utils/fileType.js";
 import { logger } from "../utils/logger.js";
-import { optimizeImageForAI, cleanupAiPreview } from "./aiMediaPreview.js";
+import {
+  optimizeImageForAI,
+  extractVideoFrameForAI,
+  cleanupAiPreview,
+} from "./aiMediaPreview.js";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -19,7 +23,9 @@ const aiResponseSchema = z.object({
   phase: phaseSchema,
   folderHint: folderHintSchema,
   description: z.string().min(1),
-  confidence: z.number().min(0).max(1),
+  // Accept any number — AI sometimes returns a percentage (e.g. 90 instead of 0.9).
+  // Normalized to 0..1 after parsing.
+  confidence: z.number(),
 });
 
 // ---------------------------------------------------------------------------
@@ -164,6 +170,17 @@ export async function classifyAttachment(params: {
   messageText?: string | null;
   originalFilename?: string | null;
   projectName?: string | null;
+  /**
+   * Raw informal chat message that may carry phase/location hints.
+   * Passed alongside messageText for richer AI context.
+   */
+  chatHintText?: string | null;
+  /**
+   * Pre-generated image or video-frame preview path.
+   * When provided the classifier reuses it and does NOT clean it up —
+   * the caller is responsible for cleanup.
+   */
+  previewPath?: string;
 }): Promise<ClassificationResult> {
   const fallback = buildFallbackClassification({
     category: params.category,
@@ -179,7 +196,9 @@ export async function classifyAttachment(params: {
     return fallback;
   }
 
-  let aiImagePath: string | null = null;
+  // Track the preview path and whether we own it (and therefore must clean it up).
+  let aiImagePath: string | null = params.previewPath ?? null;
+  const ownsPreview = params.previewPath === undefined;
 
   try {
     const openai = getClient();
@@ -202,11 +221,13 @@ export async function classifyAttachment(params: {
         text:
           `File category: ${params.category}\n` +
           `Original filename: ${params.originalFilename ?? "Unknown"}\n` +
-          `Message text: ${params.messageText ?? "None"}`,
+          `Message text: ${params.messageText ?? "None"}\n` +
+          `Recent chat context: ${params.chatHintText ?? "None"}`,
       },
     ];
 
-    if (params.category === "image") {
+    // Generate preview if not already provided by the caller.
+    if (aiImagePath === null && params.category === "image") {
       const preview = await optimizeImageForAI({
         inputPath: params.filePath,
         tempDir: path.join(process.cwd(), ".tmp", "ai-previews"),
@@ -236,10 +257,40 @@ export async function classifyAttachment(params: {
         },
         "Built optimized image preview for AI",
       );
+    }
 
+    if (aiImagePath === null && params.category === "video") {
+      try {
+        const frame = await extractVideoFrameForAI({
+          inputPath: params.filePath,
+          tempDir: path.join(process.cwd(), ".tmp", "ai-previews"),
+          width: 1280,
+          seekSeconds: 2,
+        });
+
+        aiImagePath = frame.framePath;
+
+        logger.info(
+          {
+            filePath: params.filePath,
+            framePath: frame.framePath,
+            originalBytes: frame.originalBytes,
+            frameBytes: frame.frameBytes,
+          },
+          "Extracted video frame for AI",
+        );
+      } catch (frameError: unknown) {
+        logger.warn(
+          { error: frameError, filePath: params.filePath },
+          "Video frame extraction failed — classifying without image",
+        );
+      }
+    }
+
+    // Attach preview image to content if available.
+    if (aiImagePath !== null) {
       const fileBuffer = await fs.readFile(aiImagePath);
       const base64Image = fileBuffer.toString("base64");
-
       userContent.push({
         type: "input_image",
         image_url: `data:image/jpeg;base64,${base64Image}`,
@@ -247,19 +298,32 @@ export async function classifyAttachment(params: {
       });
     }
 
+    const systemPrompt = [
+      "You classify construction-site attachments for a file archiver.",
+      "Return valid JSON only. No markdown. No explanations.",
+      "",
+      "Fields:",
+      "  phase      — construction phase. MUST be one of: Demo, Framing, Electrical, Finish.",
+      "  folderHint — MUST be one of: Photos, Renders, Final.",
+      "  description — short PascalCase label for the file name (e.g. FramingProgress, BathroomTile, SiteWalkVideo).",
+      "  confidence — decimal 0.0–1.0.",
+      "",
+      "Phase detection rules — use ALL available context (message, chat hint, image, filename):",
+      "  Demo       → demolition, tear-out, dumpster, gutted walls, bare concrete",
+      "  Framing    → studs, framing, lumber, rough walls, wood structure",
+      "  Electrical → wires, panels, outlets, switches, conduit, junction boxes",
+      "  Finish     → tile, paint, cabinets, flooring, fixtures, trim, final look",
+      "",
+      "ALWAYS return a phase — never omit it. If genuinely unclear, pick the best match from visual cues.",
+      "Use Finish as the last resort only if no other phase is visible.",
+    ].join("\n");
+
     const response = await openai.responses.create({
       model: env.OPENAI_MODEL ?? "gpt-4.1-mini",
       input: [
         {
           role: "system",
-          content: [
-            {
-              type: "input_text",
-              text:
-                "You classify construction attachments for a file archiver. " +
-                "Return valid JSON only. No markdown. No explanations.",
-            },
-          ],
+          content: [{ type: "input_text", text: systemPrompt }],
         },
         {
           role: "user",
@@ -273,9 +337,16 @@ export async function classifyAttachment(params: {
     logger.info({ filePath: params.filePath, rawText }, "Raw AI response text");
 
     const parsed: unknown = JSON.parse(rawText);
-    const aiResult = aiResponseSchema.parse(parsed);
+    const raw = aiResponseSchema.parse(parsed);
+
+    // Normalize confidence: AI sometimes returns a percentage (90 → 0.9).
+    let confidence = raw.confidence;
+    if (confidence > 1 && confidence <= 100) confidence = confidence / 100;
+    confidence = Math.min(1, Math.max(0, confidence));
+
     const result: ClassificationResult = {
-      ...aiResult,
+      ...raw,
+      confidence,
       classificationSource: "ai",
     };
 
@@ -297,6 +368,8 @@ export async function classifyAttachment(params: {
 
     return fallback;
   } finally {
-    await cleanupAiPreview(aiImagePath);
+    if (ownsPreview) {
+      await cleanupAiPreview(aiImagePath);
+    }
   }
 }

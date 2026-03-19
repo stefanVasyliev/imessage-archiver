@@ -4,7 +4,12 @@ import * as path from "node:path";
 export interface ProcessedFileEvent {
   readonly processedAtIso: string;
   readonly messageRowId: number;
+  readonly senderId: string;
   readonly projectName: string;
+  /** How the project was resolved: user-context | chat-context | tag | ai | fallback */
+  readonly projectResolutionSource: string;
+  readonly needsManualReview: boolean;
+  readonly originalFilename?: string;
   readonly fileName: string;
   readonly relativePath: string;
   readonly rootFolder: "Photos" | "Videos" | "Renders" | "Final";

@@ -152,20 +152,38 @@ function resolvePhaseFolder(
 // Public builder
 // ---------------------------------------------------------------------------
 
+const GENERIC_DESCRIPTIONS = new Set([
+  "ProgressPhoto",
+  "SiteWalkVideo",
+  "Document",
+]);
+
 export function buildFinalNaming(params: {
   row: RawAttachmentRow;
   category: SupportedFileCategory;
   classification: ClassificationResult;
   originalPath: string;
+  suggestedLocation?: string;
+  suggestedDescription?: string;
+  suggestedPhase?: "Demo" | "Framing" | "Electrical" | "Finish";
 }): FinalNamingResult {
   const ext = path.extname(params.originalPath).toLowerCase();
 
   const initials = resolveInitials(params.row);
   const date = resolveDate(params.row);
 
-  const normalized = normalizeDescription(params.classification.description);
+  // When the AI returns a generic description, enrich it with resolution hints.
+  let rawDescription = params.classification.description;
+  if (GENERIC_DESCRIPTIONS.has(rawDescription)) {
+    const hints = [params.suggestedLocation, params.suggestedDescription]
+      .filter(Boolean)
+      .join(" ");
+    if (hints) rawDescription = hints;
+  }
 
-  // Build the [Initials]_[MM-DD-YY]_[Location]_[Description] segments.
+  const normalized = normalizeDescription(rawDescription);
+
+  // Build the [Initials]_[MMDDYY]_[Location]_[Description] segments.
   let fileName = `${initials}_${date}`;
 
   if (normalized !== null) {
@@ -179,7 +197,17 @@ export function buildFinalNaming(params: {
   fileName += ext;
 
   const rootFolder = resolveRootFolder(params.category, params.classification);
-  const phaseFolder = resolvePhaseFolder(rootFolder, params.classification);
+  let phaseFolder = resolvePhaseFolder(rootFolder, params.classification);
+
+  // When the classifier fell back to text-based phase detection and the project
+  // resolver's AI returned a phase hint, prefer the resolver's hint.
+  if (
+    phaseFolder !== undefined &&
+    params.classification.classificationSource !== "ai" &&
+    params.suggestedPhase != null
+  ) {
+    phaseFolder = params.suggestedPhase;
+  }
 
   return {
     rootFolder,
