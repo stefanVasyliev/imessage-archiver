@@ -18,7 +18,7 @@ const reportLog = createReportLog(appPaths.reportLogFile);
 // To switch to production: set TEST_MODE = false.
 // ---------------------------------------------------------------------------
 
-export const TEST_MODE = true;
+export const TEST_MODE = false;
 
 export const CRON_SCHEDULE = TEST_MODE
   ? "* * * * *" // every minute (test)

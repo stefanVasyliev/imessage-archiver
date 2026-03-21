@@ -78,7 +78,9 @@ export function parseProjectTag(text: string): string | null {
 
 export async function getKnownProjects(): Promise<string[]> {
   try {
-    const entries = await fsNode.readdir(appPaths.root, { withFileTypes: true });
+    const entries = await fsNode.readdir(appPaths.root, {
+      withFileTypes: true,
+    });
     return entries
       .filter(
         (e) =>
@@ -106,7 +108,7 @@ function normalize(s: string): string {
  */
 function getProjectWordTokens(project: string): string[] {
   return project
-    .replace(/([a-z])([A-Z])/g, "$1 $2") // split PascalCase
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/[_-]+/g, " ")
     .toLowerCase()
     .split(/\s+/)
@@ -120,7 +122,7 @@ function getProjectWordTokens(project: string): string[] {
  *           project name as a continuous substring (original behavior).
  *
  * Tier 2 — word-token overlap: ≥ 2 of the project's significant words appear
- *           in the message text.  This lets "Office Orange County" match
+ *           in the message text. This lets "Office Orange County" match
  *           "Office_OrangeCounty_ModernRed" without requiring AI.
  *
  * The longest-name project wins when multiple candidates qualify.
@@ -132,15 +134,12 @@ export function findMatchingProject(
   const normalizedText = normalize(text);
   const sorted = [...knownProjects].sort((a, b) => b.length - a.length);
 
-  // Tier 1: full-name substring (fast path, existing behavior).
   for (const project of sorted) {
     if (normalizedText.includes(normalize(project))) return project;
     const normalizedFolder = normalize(normalizeProjectName(project));
     if (normalizedText.includes(normalizedFolder)) return project;
   }
 
-  // Tier 2: word-token overlap — pick the project with the most word matches,
-  // requiring at least 2 matches to avoid false positives on common words.
   const textWords = new Set(
     text
       .toLowerCase()
@@ -182,8 +181,6 @@ type ContentItem = TextItem | ImageItem;
 
 const aiProjectSchema = z.object({
   projectName: z.string().nullable(),
-  // Accept any number — AI sometimes returns percentage (e.g. 90 instead of 0.9).
-  // Normalized to 0..1 after parsing.
   confidence: z.number(),
   reasoning: z.string(),
   suggestedLocation: z.string().optional(),
@@ -196,8 +193,6 @@ const aiProjectSchema = z.object({
 
 type AiProjectResult = z.infer<typeof aiProjectSchema>;
 
-// Normalize AI confidence to 0..1.
-// If the model returns a percentage (e.g. 90), divide by 100.
 function normalizeConfidence(raw: number): number {
   let c = raw;
   if (c > 1 && c <= 100) {
@@ -211,14 +206,15 @@ function normalizeConfidence(raw: number): number {
 }
 
 async function inferProjectViaAI(params: {
-  messageText: string | null;
-  /** Pre-resolved context text from sender or chat store (a previously matched message). */
-  contextMessageText: string | null;
   /**
-   * Recent unresolved chat messages (oldest first, up to 5).
-   * Builders typically say the project name in a text message before sending photos,
-   * so earlier messages in the list may carry the key project hint.
+   * The last meaningful text message sent by the SAME person who sent the
+   * attachment.  This is the strongest routing signal and is shown first
+   * in the prompt.
    */
+  lastSenderMessage: string | null;
+  messageText: string | null;
+  contextMessageText: string | null;
+  /** Recent chat messages from all participants, oldest first, up to 8. */
   recentChatMessages: string[];
   originalFilename: string | null;
   knownProjects: string[];
@@ -234,7 +230,6 @@ async function inferProjectViaAI(params: {
 
   const client = getOpenAIClient();
 
-  // ---- System prompt with structured project list ----
   const systemPrompt = [
     "You are a file router for a construction company.",
     "",
@@ -256,16 +251,23 @@ async function inferProjectViaAI(params: {
     "RULES:",
     "  1. Return EXACTLY one project name from the list above — same casing, verbatim.",
     "  2. NEVER invent a project name not in the list.",
-    "  3. Recent chat messages are the STRONGEST signal — use them first.",
-    "  4. Image content is a weaker signal — use it only when text context is absent.",
-    "  5. Return confidence as a decimal 0.0–1.0.",
-    "  6. If you cannot identify the project with ≥ 0.6 confidence, return null.",
+    "  3. LAST MESSAGE FROM SAME SENDER is the STRONGEST signal — trust it above all else.",
+    "  4. Recent chat messages are secondary context.",
+    "  5. Image content is a weaker signal — use it only when text context is absent.",
+    "  6. Return confidence as a decimal 0.0–1.0.",
+    "  7. If you cannot identify the project with ≥ 0.6 confidence, return null.",
     "",
     'Return strict JSON: { "projectName": string | null, "confidence": number, "reasoning": string, "suggestedLocation"?: string, "suggestedDescription"?: string, "suggestedPhase"?: "Demo" | "Framing" | "Electrical" | "Finish" | null }',
   ].join("\n");
 
-  // ---- User content: structured context block ----
   const contextLines: string[] = [];
+
+  // Sender's last text is the primary signal — shown first so AI weights it highest.
+  if (params.lastSenderMessage) {
+    contextLines.push(
+      `LAST MESSAGE FROM SAME SENDER: "${params.lastSenderMessage}"`,
+    );
+  }
 
   if (params.recentChatMessages.length > 0) {
     contextLines.push("RECENT CHAT MESSAGES (oldest to newest):");
@@ -325,7 +327,6 @@ async function inferProjectViaAI(params: {
   const raw = aiProjectSchema.parse(parsed);
   const confidence = normalizeConfidence(raw.confidence);
 
-  // Hard validation: reject hallucinated project names.
   if (
     raw.projectName !== null &&
     !params.knownProjects.includes(raw.projectName)
@@ -360,50 +361,67 @@ export async function resolveProject(params: {
   messageText: string | null;
   originalFilename: string | null;
   knownProjects: string[];
-  /** Pre-generated image or video-frame preview path — caller owns cleanup. */
   previewImagePath?: string;
+  /**
+   * The last meaningful text message from the same sender, fetched from DB
+   * at attachment-processing time.  Passed directly to AI as the primary signal.
+   */
+  lastSenderMessage?: string | null;
+  /**
+   * Text messages fetched directly from DB just before this attachment's ROWID.
+   * Oldest-first. Merged into AI context to guarantee context even when the
+   * in-memory store is empty (restart, same-batch race condition).
+   */
+  dbContextMessages?: string[];
 }): Promise<ProjectResolution> {
   const previewImagePath = params.previewImagePath ?? null;
 
-  // 1. Sender-specific context — must be a currently known project.
-  const senderContext = params.contextStore.get(params.senderId);
+  const senderContext = params.contextStore.getValidSender(params.senderId);
+  const staleSenderContext =
+    senderContext === null
+      ? params.contextStore.getSender(params.senderId)
+      : null;
+
+  if (staleSenderContext !== null) {
+    logger.info(
+      {
+        senderId: params.senderId,
+        ageMinutes: Math.round(
+          (Date.now() - staleSenderContext.setAtMs) / 60_000,
+        ),
+        projectName: staleSenderContext.projectName,
+      },
+      "Sender context exists but has expired — treating as unavailable, falling through to AI",
+    );
+  }
+
   if (senderContext !== null) {
-    if (params.knownProjects.includes(senderContext.projectName)) {
-      logger.info(
-        {
-          senderId: params.senderId,
-          projectName: senderContext.projectName,
-          source: "user-context",
-        },
-        "Project resolved from sender context",
-      );
+    if (
+      senderContext.projectName !== undefined &&
+      params.knownProjects.includes(senderContext.projectName)
+    ) {
       return {
         projectName: senderContext.projectName,
         source: "user-context",
         confidence: 0.95,
         needsManualReview: false,
-        reasoning: `Active sender context for "${params.senderId}"`,
+        reasoning: `Valid sender context for "${params.senderId}" — pre-resolved project "${senderContext.projectName}"`,
       };
     }
-    logger.warn(
-      { senderId: params.senderId, contextProject: senderContext.projectName },
-      "Sender context project not in known folders — falling through",
+
+    logger.info(
+      {
+        senderId: params.senderId,
+        textPreview: senderContext.rawMessageText.slice(0, 80),
+        ageMinutes: Math.round((Date.now() - senderContext.setAtMs) / 60_000),
+      },
+      "Valid sender context available (raw text, no pre-resolved project) — will use in AI step",
     );
   }
 
-  // 2. Chat-level context — covers attachments from any participant in the chat.
   const chatContext = params.contextStore.getChat(params.chatId);
   if (chatContext !== null && chatContext.projectName !== null) {
     if (params.knownProjects.includes(chatContext.projectName)) {
-      logger.info(
-        {
-          chatId: params.chatId,
-          senderId: params.senderId,
-          projectName: chatContext.projectName,
-          source: "chat-context",
-        },
-        "Project resolved from chat context",
-      );
       return {
         projectName: chatContext.projectName,
         source: "user-context",
@@ -418,7 +436,6 @@ export async function resolveProject(params: {
     );
   }
 
-  // 3. Explicit project tag — validated against knownProjects.
   if (params.messageText) {
     const tag = parseProjectTag(params.messageText);
     if (tag) {
@@ -455,17 +472,14 @@ export async function resolveProject(params: {
     }
   }
 
-  // 4. AI inference — full context: text + sender/chat context + raw hint + image/video frame.
   if (env.OPENAI_API_KEY && params.knownProjects.length > 0) {
-    // Resolved context text — sender's last matched message, or chat's last matched message.
     const contextMessageText =
       senderContext?.rawMessageText ??
-      (chatContext?.projectName !== null ? chatContext?.rawMessageText : null) ??
+      (chatContext?.projectName !== null
+        ? chatContext?.rawMessageText
+        : null) ??
       null;
 
-    // Recent unresolved chat messages (oldest first) — the primary signal for AI.
-    // These accumulate across multiple calls to setChatHint so an earlier
-    // "Office Orange County" is not lost when a later "hey" message arrives.
     const recentChatMessages: string[] =
       chatContext?.projectName === null
         ? chatContext.rawMessages.length > 0
@@ -475,7 +489,25 @@ export async function resolveProject(params: {
             : []
         : [];
 
-    // Include the sender's last message if it adds context not already in the list.
+    if (params.dbContextMessages && params.dbContextMessages.length > 0) {
+      const inMemory = new Set(recentChatMessages);
+      const dbOnly = params.dbContextMessages.filter((m) => !inMemory.has(m));
+      recentChatMessages.unshift(...dbOnly);
+
+      if (recentChatMessages.length > 8) {
+        recentChatMessages.splice(0, recentChatMessages.length - 8);
+      }
+    } else {
+      logger.info(
+        {
+          chatId: params.chatId,
+          senderId: params.senderId,
+          dbContextMessageCount: 0,
+        },
+        "[debug:db-context-messages] No DB context messages available before AI inference",
+      );
+    }
+
     if (
       senderContext?.rawMessageText &&
       !recentChatMessages.includes(senderContext.rawMessageText)
@@ -483,30 +515,9 @@ export async function resolveProject(params: {
       recentChatMessages.push(senderContext.rawMessageText);
     }
 
-    logger.info(
-      {
-        senderId: params.senderId,
-        chatId: params.chatId,
-        hasPreview: previewImagePath !== null,
-        hasMessageText: params.messageText !== null,
-        hasContextText: contextMessageText !== null,
-        recentChatMessageCount: recentChatMessages.length,
-        recentChatPreview: recentChatMessages.at(-1)?.slice(0, 80),
-        contextSource:
-          senderContext !== null
-            ? "sender"
-            : chatContext?.projectName !== null
-              ? "chat-resolved"
-              : chatContext !== null
-                ? "chat-hint"
-                : "none",
-        knownProjectCount: params.knownProjects.length,
-      },
-      "Running AI project inference",
-    );
-
     try {
       const ai = await inferProjectViaAI({
+        lastSenderMessage: params.lastSenderMessage ?? null,
         messageText: params.messageText,
         contextMessageText,
         recentChatMessages,
@@ -517,17 +528,6 @@ export async function resolveProject(params: {
 
       if (ai.projectName !== null) {
         const confident = ai.confidence >= AI_CONFIDENCE_THRESHOLD;
-
-        logger.info(
-          {
-            projectName: ai.projectName,
-            confidence: ai.confidence,
-            confident,
-            reasoning: ai.reasoning,
-            source: "ai",
-          },
-          "AI project inference result",
-        );
 
         return {
           projectName: confident ? ai.projectName : MANUAL_REVIEW_PROJECT,
@@ -559,7 +559,6 @@ export async function resolveProject(params: {
     }
   }
 
-  // 5. Unresolved → Manual Review.
   return {
     projectName: MANUAL_REVIEW_PROJECT,
     source: "fallback",

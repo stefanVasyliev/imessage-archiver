@@ -29,20 +29,11 @@ export async function extractAttachment(
     return null;
   }
 
-  logger.info(
-    { rawAttachmentFilename: row.attachmentFilename },
-    "Raw attachment filename from chat.db",
-  );
-
   const sourcePath = normalizeAppleAttachmentPath(row.attachmentFilename);
   const fileName = buildTemporaryFileName(row);
   const destinationPath = path.join(appPaths.tempIncoming, fileName);
 
-  logger.info({ sourcePath }, "Normalized attachment source path");
-
   const sourceExists = await fs.pathExists(sourcePath);
-
-  logger.info({ sourcePath, sourceExists }, "Checked attachment source path");
 
   if (!sourceExists) {
     logger.warn({ sourcePath }, "Attachment source file does not exist");
@@ -51,14 +42,8 @@ export async function extractAttachment(
 
   await fs.ensureDir(appPaths.tempIncoming);
 
-  logger.info({ sourcePath, destinationPath }, "About to copy attachment");
 
   await fs.copy(sourcePath, destinationPath, { overwrite: true });
-
-  logger.info(
-    { destinationPath },
-    "Attachment copied into temporary directory",
-  );
 
   return {
     sourcePath,

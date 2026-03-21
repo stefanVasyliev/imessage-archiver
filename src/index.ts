@@ -2,6 +2,7 @@ import { schedule } from "node-cron";
 import fs from "fs-extra";
 import * as path from "node:path";
 import { env } from "./config/env.js";
+import type Database from "better-sqlite3";
 import { openChatDb } from "./db/chatDb.js";
 import { readState, writeState } from "./db/stateStore.js";
 import {
@@ -25,6 +26,8 @@ import {
   getNewAttachmentRows,
   getNewTextMessages,
   getRecentTextMessages,
+  getLastMeaningfulTextMessageBySenderBefore,
+  getRecentTextMessagesByChatBefore,
   type RawAttachmentRow,
   type TextMessageRow,
 } from "./services/pollMessages.js";
@@ -43,10 +46,10 @@ import {
   getReportPeriodStart,
 } from "./services/weeklyReport.js";
 import { buildFinalNaming } from "./utils/finalNaming.js";
+import { appleMessageDateToDate } from "./utils/date.js";
 import { getFileCategory } from "./utils/fileType.js";
 import { appPaths } from "./utils/filePaths.js";
 import { logger } from "./utils/logger.js";
-import { normalizeProjectName } from "./utils/projectFolders.js";
 
 const metadataLog = createMetadataLog(appPaths.processedLogFile);
 const activityLog = createActivityLog(appPaths.activityLogFile);
@@ -77,7 +80,7 @@ function getSenderId(row: {
   isFromMe: number;
   handleId: string | null;
 }): string {
-  return row.isFromMe === 1 ? "momo" : (row.handleId ?? "unknown");
+  return row.handleId ?? "unknown";
 }
 
 startDashboard();
@@ -134,30 +137,42 @@ function buildRenderClassification(): ClassificationResult {
 
 const VIDEO_CONFIDENCE_THRESHOLD = 0.4;
 
+type RoutingResult = {
+  dir: string;
+  routingMode: "project" | "project-manual-review" | "global-manual-review";
+};
+
 async function resolveTargetDirectory(params: {
   projectName: string;
   rootFolder: string;
   phaseFolder: string | undefined;
-}): Promise<string> {
+}): Promise<RoutingResult> {
   const { projectName, rootFolder, phaseFolder } = params;
 
   // Unknown project → global ManualReview.
   if (projectName === MANUAL_REVIEW_PROJECT) {
-    return appPaths.manualReviewDir;
+    return {
+      dir: appPaths.manualReviewDir,
+      routingMode: "global-manual-review",
+    };
   }
 
-  const projectRoot = path.join(
-    appPaths.root,
-    normalizeProjectName(projectName),
-  );
+  // Use projectName as-is — it comes from getKnownProjects() which reads actual
+  // folder names from disk.  normalizeProjectName() would corrupt names like
+  // "Office_OrangeCounty_ModernRed" → "OfficeOrangeCountyModernRed", causing a
+  // false path-not-found and a silent fallback to ManualReview.
+  const projectRoot = path.join(appPaths.root, projectName);
 
   // Project folder must exist — never auto-create.
   if (!(await fs.pathExists(projectRoot))) {
     logger.warn(
       { projectName, projectRoot },
-      "Project folder not found — routing to global ManualReview",
+      "[routing] Project folder not found — routing to global ManualReview",
     );
-    return appPaths.manualReviewDir;
+    return {
+      dir: appPaths.manualReviewDir,
+      routingMode: "global-manual-review",
+    };
   }
 
   const projectManualReview = path.join(projectRoot, "Manual Review");
@@ -168,12 +183,12 @@ async function resolveTargetDirectory(params: {
     if (!(await fs.pathExists(targetDir))) {
       logger.warn(
         { targetDir },
-        "Root folder not found on disk — routing to project Manual Review",
+        "[routing] Root folder not found on disk — routing to project Manual Review",
       );
       await fs.ensureDir(projectManualReview);
-      return projectManualReview;
+      return { dir: projectManualReview, routingMode: "project-manual-review" };
     }
-    return targetDir;
+    return { dir: targetDir, routingMode: "project" };
   }
 
   // Photos / Videos: rootFolder must exist.
@@ -181,32 +196,31 @@ async function resolveTargetDirectory(params: {
   if (!(await fs.pathExists(rootDir))) {
     logger.warn(
       { rootDir },
-      "Root folder not found on disk — routing to project Manual Review",
+      "[routing] Root folder not found on disk — routing to project Manual Review",
     );
     await fs.ensureDir(projectManualReview);
-    return projectManualReview;
+    return { dir: projectManualReview, routingMode: "project-manual-review" };
   }
 
   // Phase unknown — fall back to root folder (Photos/ or Videos/).
   if (phaseFolder === undefined) {
     logger.info(
-      { projectName, rootFolder, rootDir },
-      "Phase unknown — falling back to root folder",
+      { projectName, rootFolder, rootDir, routingMode: "project" },
+      "[routing] Phase unknown — falling back to root folder",
     );
-    return rootDir;
+    return { dir: rootDir, routingMode: "project" };
   }
 
   // Phase folder must exist — if not, fall back to root folder.
   const phaseDir = path.join(rootDir, phaseFolder);
   if (!(await fs.pathExists(phaseDir))) {
     logger.warn(
-      { phaseDir, rootDir },
-      "Phase folder not found on disk — falling back to root folder",
+      { phaseDir, rootDir, routingMode: "project" },
+      "[routing] Phase folder not found on disk — falling back to root folder",
     );
-    return rootDir;
+    return { dir: rootDir, routingMode: "project" };
   }
-
-  return phaseDir;
+  return { dir: phaseDir, routingMode: "project" };
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +253,10 @@ function matchProjectFromText(
 
 /**
  * Apply project context from a text row: update both sender and chat context
- * and emit debug logs.
+ * and emit structured logs.
+ *
+ * Uses the Apple message date as sentAtMs so the 20-minute validity window
+ * is based on when the sender actually typed the message, not processing time.
  */
 function applyContextFromTextRow(
   row: TextMessageRow,
@@ -247,7 +264,10 @@ function applyContextFromTextRow(
   source: "recent-history-scan" | "new-message",
 ): void {
   const senderId = getSenderId(row);
-  contextStore.set(senderId, projectName, row.text ?? "");
+  const sentAtMs =
+    appleMessageDateToDate(row.messageDate)?.getTime() ?? Date.now();
+
+  contextStore.setSender(senderId, row.text ?? "", { projectName, sentAtMs });
   logger.info(
     {
       source,
@@ -255,6 +275,7 @@ function applyContextFromTextRow(
       chatId: row.chatId,
       projectName,
       messageRowId: row.messageRowId,
+      ageMinutes: Math.round((Date.now() - sentAtMs) / 60_000),
       text: row.text?.slice(0, 120),
     },
     "Sender context updated from text message",
@@ -280,147 +301,141 @@ async function processNewMessages(): Promise<void> {
   const db = openChatDb();
 
   try {
-  const state = await readState();
-  const knownProjects = await getKnownProjects();
+    const state = await readState();
+    const knownProjects = await getKnownProjects();
 
-  logger.info(
+    // ---- Context seeding pass (history-scan) ----
+    // Read the 30 most recent text messages regardless of the state pointer so
+    // that project-defining messages sent before the last processed attachment
+    // ROWID are still captured (e.g. after restart or pointer advancement).
+    // recentRows is newest-first; we walk it to find the most recent useful message.
+    const recentRows = getRecentTextMessages(db, 30);
+
     {
-      lastProcessedMessageRowId: state.lastProcessedMessageRowId,
-      knownProjects,
-    },
-    "Poll cycle started",
-  );
+      // Collect up to 5 recent non-matching messages as raw hints.
+      // recentRows is newest-first; we reverse before storing so the context
+      // store accumulates them oldest-first (the correct order for AI context).
+      const hintRows: TextMessageRow[] = [];
+      let resolvedFromHistory = false;
+      // Track which senders we have already seeded so we store only the most
+      // recent message per sender (first occurrence in newest-first iteration).
+      const seededSenders = new Set<string>();
 
-  // ---- Context seeding pass (history-scan) ----
-  // Read the 30 most recent text messages regardless of the state pointer so
-  // that project-defining messages sent before the last processed attachment
-  // ROWID are still captured (e.g. after restart or pointer advancement).
-  // recentRows is newest-first; we walk it to find the most recent useful message.
-  const recentRows = getRecentTextMessages(db, 30);
-  logger.info(
-    { count: recentRows.length },
-    "Recent text messages fetched for context seeding",
-  );
+      for (const row of recentRows) {
+        if (!row.text) continue;
+        const senderId = getSenderId(row);
+        const sentAtMs =
+          appleMessageDateToDate(row.messageDate)?.getTime() ?? Date.now();
 
-  {
-    // Collect up to 5 recent non-matching messages as raw hints.
-    // recentRows is newest-first; we reverse before storing so the context
-    // store accumulates them oldest-first (the correct order for AI context).
-    const hintRows: TextMessageRow[] = [];
-    let resolvedFromHistory = false;
+        // Seed the most recent text for this sender (skip older messages for the
+        // same sender — they will be overwritten if applyContextFromTextRow fires).
+        if (!seededSenders.has(senderId)) {
+          contextStore.setSender(senderId, row.text, { sentAtMs });
+          seededSenders.add(senderId);
+        }
 
-    for (const row of recentRows) {
-      if (!row.text) continue;
-      const projectName = matchProjectFromText(row.text, knownProjects);
-      if (projectName !== null) {
-        applyContextFromTextRow(row, projectName, "recent-history-scan");
-        resolvedFromHistory = true;
-        break;
+        const projectName = matchProjectFromText(row.text, knownProjects);
+        if (projectName !== null) {
+          // applyContextFromTextRow upgrades the sender entry with a resolved
+          // projectName and correct sentAtMs — overwriting the seed above.
+          applyContextFromTextRow(row, projectName, "recent-history-scan");
+          resolvedFromHistory = true;
+          break;
+        }
+        if (hintRows.length < 5) {
+          hintRows.push(row);
+        }
       }
-      if (hintRows.length < 5) {
-        hintRows.push(row);
+
+      // Only store raw hints when no resolved project was found.
+      // Store oldest-first so setChatHint accumulates them in chronological order.
+      if (!resolvedFromHistory) {
+        for (const row of [...hintRows].reverse()) {
+          if (!row.text) continue;
+          contextStore.setChatHint(row.chatId, row.text);
+        }
       }
     }
 
-    // Only store raw hints when no resolved project was found.
-    // Store oldest-first so setChatHint accumulates them in chronological order.
-    if (!resolvedFromHistory) {
-      for (const row of [...hintRows].reverse()) {
-        if (!row.text) continue;
-        contextStore.setChatHint(row.chatId, row.text);
+    // ---- New text-message pass ----
+    // Handles messages strictly newer than lastProcessedMessageRowId.
+    // Always stores raw hint; upgrades to resolved context when a project matches.
+    const textRows = getNewTextMessages(db, state.lastProcessedMessageRowId);
+
+    for (const textRow of textRows) {
+      if (!textRow.text) continue;
+      const senderId = getSenderId(textRow);
+
+      void messageLog.write({
+        ts: new Date().toISOString(),
+        messageRowId: textRow.messageRowId,
+        senderId,
+        isFromMe: textRow.isFromMe === 1,
+        text: textRow.text,
+      });
+
+      // Always store the sender's last text message so that ANY text they send
+      // becomes their active context — not only project-matching messages.
+      // New messages arrive in real-time so sentAtMs ≈ Date.now().
+      contextStore.setSender(senderId, textRow.text);
+
+      const projectName = matchProjectFromText(textRow.text, knownProjects);
+      logger.info(
+        {
+          messageRowId: textRow.messageRowId,
+          senderId,
+          chatId: textRow.chatId,
+          text: textRow.text.slice(0, 120),
+          projectMatched: projectName,
+        },
+        "New text message evaluated for project context",
+      );
+
+      if (projectName !== null) {
+        // Upgrade sender entry with resolved projectName, then update chat context.
+        applyContextFromTextRow(textRow, projectName, "new-message");
+        void activityLog.write({
+          ts: new Date().toISOString(),
+          kind: "context_updated",
+          messageRowId: textRow.messageRowId,
+          senderId,
+          projectName,
+          detail: textRow.text.slice(0, 120),
+        });
+      } else {
+        // No pre-resolved project — store raw text as a weak chat hint so the AI
+        // can use informal references like "woodland" or "orange office".
+        contextStore.setChatHint(textRow.chatId, textRow.text);
         logger.info(
           {
-            chatId: row.chatId,
-            hint: row.text.slice(0, 120),
-            messageRowId: row.messageRowId,
+            chatId: textRow.chatId,
+            senderId,
+            hint: textRow.text.slice(0, 120),
+            messageRowId: textRow.messageRowId,
           },
-          "Raw chat hint stored from history scan",
+          "Raw chat hint stored from new text message",
         );
       }
     }
-  }
 
-  // ---- New text-message pass ----
-  // Handles messages strictly newer than lastProcessedMessageRowId.
-  // Always stores raw hint; upgrades to resolved context when a project matches.
-  const textRows = getNewTextMessages(db, state.lastProcessedMessageRowId);
-  logger.info(
-    {
-      count: textRows.length,
-      lastProcessedMessageRowId: state.lastProcessedMessageRowId,
-    },
-    "New text messages fetched",
-  );
+    const rows = getNewAttachmentRows(db, state.lastProcessedMessageRowId);
 
-  for (const textRow of textRows) {
-    if (!textRow.text) continue;
-    const senderId = getSenderId(textRow);
+    let newestRowId = state.lastProcessedMessageRowId;
 
-    void messageLog.write({
-      ts: new Date().toISOString(),
-      messageRowId: textRow.messageRowId,
-      senderId,
-      isFromMe: textRow.isFromMe === 1,
-      text: textRow.text,
-    });
+    for (const row of rows) {
+      newestRowId = Math.max(newestRowId, row.messageRowId);
 
-    const projectName = matchProjectFromText(textRow.text, knownProjects);
-    logger.info(
-      {
-        messageRowId: textRow.messageRowId,
-        senderId,
-        chatId: textRow.chatId,
-        text: textRow.text.slice(0, 120),
-        projectMatched: projectName,
-      },
-      "New text message evaluated for project context",
-    );
-
-    if (projectName !== null) {
-      // Pre-resolved — set strong sender + chat context.
-      applyContextFromTextRow(textRow, projectName, "new-message");
-      void activityLog.write({
-        ts: new Date().toISOString(),
-        kind: "context_updated",
-        messageRowId: textRow.messageRowId,
-        senderId,
-        projectName,
-        detail: textRow.text.slice(0, 120),
-      });
-    } else {
-      // No pre-resolved project. Store raw text as a weak chat hint so the AI
-      // can use informal references like "woodland" or "orange office".
-      contextStore.setChatHint(textRow.chatId, textRow.text);
-      logger.info(
-        {
-          chatId: textRow.chatId,
-          senderId,
-          hint: textRow.text.slice(0, 120),
-          messageRowId: textRow.messageRowId,
-        },
-        "Raw chat hint stored from new text message",
-      );
+      try {
+        await processAttachment(row, knownProjects, db);
+      } catch (error: unknown) {
+        logger.error(
+          { error, messageRowId: row.messageRowId },
+          "Failed to process attachment — skipping",
+        );
+      }
     }
-  }
 
-  const rows = getNewAttachmentRows(db, state.lastProcessedMessageRowId);
-
-  let newestRowId = state.lastProcessedMessageRowId;
-
-  for (const row of rows) {
-    newestRowId = Math.max(newestRowId, row.messageRowId);
-
-    try {
-      await processAttachment(row, knownProjects);
-    } catch (error: unknown) {
-      logger.error(
-        { error, messageRowId: row.messageRowId },
-        "Failed to process attachment — skipping",
-      );
-    }
-  }
-
-  await writeState({ lastProcessedMessageRowId: newestRowId });
+    await writeState({ lastProcessedMessageRowId: newestRowId });
   } finally {
     db.close();
   }
@@ -429,6 +444,7 @@ async function processNewMessages(): Promise<void> {
 async function processAttachment(
   row: RawAttachmentRow,
   knownProjects: string[],
+  db: Database.Database,
 ): Promise<void> {
   const senderId = getSenderId(row);
 
@@ -447,10 +463,21 @@ async function processAttachment(
     return;
   }
 
-  // Combine current message with stored sender context for richer AI input.
-  const senderContext = contextStore.get(senderId);
+  // Use valid sender context (within 20-min window) to enrich AI classification.
+  // If the sender's last text is stale, skip it rather than routing to wrong project.
+  const validSenderContext = contextStore.getValidSender(senderId);
+  if (
+    validSenderContext === null &&
+    contextStore.getSender(senderId) !== null
+  ) {
+    logger.info(
+      { senderId, messageRowId: row.messageRowId },
+      "Sender context expired — will use AI fallback for project resolution",
+    );
+  }
   const combinedMessageText =
-    [row.text, senderContext?.rawMessageText].filter(Boolean).join(" ") || null;
+    [row.text, validSenderContext?.rawMessageText].filter(Boolean).join(" ") ||
+    null;
 
   const renderDetected = isLikelyRender(
     extracted.destinationPath,
@@ -477,15 +504,6 @@ async function processAttachment(
           jpegQuality: 76,
         });
         sharedPreviewPath = preview.previewPath;
-        logger.info(
-          {
-            filePath: extracted.destinationPath,
-            previewPath: sharedPreviewPath,
-            originalBytes: preview.originalBytes,
-            previewBytes: preview.previewBytes,
-          },
-          "Generated shared image preview",
-        );
       } catch (err: unknown) {
         logger.warn(
           { error: err, filePath: extracted.destinationPath },
@@ -519,6 +537,77 @@ async function processAttachment(
     }
   }
 
+  // ---- DB context enrichment ----
+  // Fetch sender's last meaningful text AND recent chat messages directly from
+  // DB at processing time — guarantees context even when the in-memory store is
+  // empty (restart, same-batch race, or first run).
+
+  const lastSenderMessage = getLastMeaningfulTextMessageBySenderBefore(db, {
+    isFromMe: row.isFromMe,
+    handleId: row.handleId,
+    chatId: row.chatId,
+    beforeRowId: row.messageRowId,
+  });
+
+  // Results come back oldest-first from getRecentTextMessagesByChatBefore.
+  const dbChatRows = getRecentTextMessagesByChatBefore(db, {
+    chatId: row.chatId,
+    beforeRowId: row.messageRowId,
+    limit: 8,
+  });
+
+  const dbContextMessages = dbChatRows.map((r) => r.text!);
+
+  console.log("[debug:sender-context-before-resolve]");
+  console.log({
+    attachmentRowId: row.attachmentRowId,
+    chatId: row.chatId,
+    senderId,
+    lastSenderMessage,
+  });
+  console.log("[debug:chat-context-before-resolve]");
+  console.log({ messages: dbContextMessages });
+
+  // Fast-path: try to resolve project from DB context before calling AI.
+  // Seeds the in-memory context store so resolveProject step 1 can cache-hit.
+  if (dbContextMessages.length > 0) {
+    const combined = dbContextMessages.join(" ");
+    const dbProject = matchProjectFromText(combined, knownProjects);
+    if (dbProject !== null) {
+      const matchingRow = [...dbChatRows]
+        .reverse()
+        .find(
+          (r) => matchProjectFromText(r.text ?? "", knownProjects) !== null,
+        );
+      if (matchingRow?.text) {
+        const sentAtMs =
+          appleMessageDateToDate(matchingRow.messageDate)?.getTime() ??
+          Date.now();
+        contextStore.setSender(senderId, matchingRow.text, {
+          projectName: dbProject,
+          sentAtMs,
+        });
+        contextStore.setChat(row.chatId, dbProject, matchingRow.text);
+        logger.info(
+          {
+            messageRowId: row.messageRowId,
+            senderId,
+            dbProject,
+            matchedText: matchingRow.text.slice(0, 80),
+          },
+          "[context] Project matched from DB context — context store seeded",
+        );
+      }
+    }
+  }
+
+  console.log("[debug:dbContextMessages-before-resolve]");
+  console.log({
+    chatId: row.chatId,
+    beforeRowId: row.messageRowId,
+    dbContextMessages,
+  });
+
   try {
     // ---- Project resolution (uses preview for AI inference) ----
 
@@ -529,6 +618,8 @@ async function processAttachment(
       messageText: row.text,
       originalFilename: row.attachmentFilename,
       knownProjects,
+      lastSenderMessage,
+      dbContextMessages,
       ...(sharedPreviewPath !== null
         ? { previewImagePath: sharedPreviewPath }
         : {}),
@@ -545,16 +636,6 @@ async function processAttachment(
         },
         "Project unresolved — routing to manual review",
       );
-    } else {
-      logger.info(
-        {
-          messageRowId: row.messageRowId,
-          projectName: resolution.projectName,
-          source: resolution.source,
-          confidence: resolution.confidence,
-        },
-        "Project resolved",
-      );
     }
 
     const projectName = resolution.projectName;
@@ -564,33 +645,35 @@ async function processAttachment(
     // context), cache it so subsequent attachments in the same chat are fast-pathed
     // without another AI call per attachment.
     if (!resolution.needsManualReview && resolution.source !== "user-context") {
+      // Always update chat context so other participants benefit.
       contextStore.setChat(row.chatId, projectName, row.text ?? "");
-      contextStore.set(senderId, projectName, row.text ?? "", {
-        ...(resolution.suggestedLocation !== undefined
-          ? { locationHint: resolution.suggestedLocation }
-          : {}),
-        ...(resolution.suggestedDescription !== undefined
-          ? { descriptionHint: resolution.suggestedDescription }
-          : {}),
-      });
-      logger.info(
-        {
-          source: resolution.source,
+
+      // Update sender context only when the attachment carried actual text —
+      // writing an empty string would erase good context from an earlier message.
+      if (row.text) {
+        contextStore.setSender(senderId, row.text, {
           projectName,
-          chatId: row.chatId,
-          senderId,
-        },
-        "Context updated after file-level project resolution",
-      );
+          ...(resolution.suggestedLocation !== undefined
+            ? { locationHint: resolution.suggestedLocation }
+            : {}),
+          ...(resolution.suggestedDescription !== undefined
+            ? { descriptionHint: resolution.suggestedDescription }
+            : {}),
+        });
+      }
     }
 
     void activityLog.write({
       ts: new Date().toISOString(),
-      kind: resolution.needsManualReview ? "manual_review_routed" : "project_resolved",
+      kind: resolution.needsManualReview
+        ? "manual_review_routed"
+        : "project_resolved",
       messageRowId: row.messageRowId,
       senderId,
       projectName,
-      ...(row.attachmentFilename !== null ? { fileName: row.attachmentFilename } : {}),
+      ...(row.attachmentFilename !== null
+        ? { fileName: row.attachmentFilename }
+        : {}),
       detail: `source=${resolution.source} confidence=${resolution.confidence.toFixed(2)} reasoning=${resolution.reasoning ?? ""}`,
     });
 
@@ -650,11 +733,15 @@ async function processAttachment(
         ? undefined
         : naming.phaseFolder;
 
-    const targetDirectory = await resolveTargetDirectory({
+    const { dir: targetDirectory } = await resolveTargetDirectory({
       projectName,
       rootFolder: naming.rootFolder,
       phaseFolder: effectivePhase,
     });
+
+    // If routing fell back to ManualReview at the filesystem level, ensure
+    // needsManualReview reflects the true outcome regardless of what
+    // resolveProject() reported.
 
     // ---- Duplicate detection ----
 
@@ -672,16 +759,6 @@ async function processAttachment(
         extracted.destinationPath,
         appPaths.duplicatesDir,
         naming.fileName,
-      );
-
-      logger.warn(
-        {
-          file: naming.fileName,
-          duplicateType: duplicate.duplicateType,
-          matchedFilePath: duplicate.matchedFilePath,
-          distance: duplicate.distance,
-        },
-        "Duplicate detected",
       );
 
       void activityLog.write({
@@ -752,11 +829,6 @@ async function processAttachment(
       fileName: naming.fileName,
       detail: `path=${finalPath} duplicate=${String(duplicate.isDuplicate)}`,
     });
-
-    logger.info(
-      { messageRowId: row.messageRowId, finalPath },
-      "Attachment processed",
-    );
   } finally {
     await cleanupAiPreview(sharedPreviewPath);
   }

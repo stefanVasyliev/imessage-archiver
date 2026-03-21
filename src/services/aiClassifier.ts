@@ -334,8 +334,6 @@ export async function classifyAttachment(params: {
 
     const rawText = response.output_text;
 
-    logger.info({ filePath: params.filePath, rawText }, "Raw AI response text");
-
     const parsed: unknown = JSON.parse(rawText);
     const raw = aiResponseSchema.parse(parsed);
 
@@ -349,8 +347,6 @@ export async function classifyAttachment(params: {
       confidence,
       classificationSource: "ai",
     };
-
-    logger.info({ filePath: params.filePath, result }, "AI classification completed");
 
     return result;
   } catch (error: unknown) {

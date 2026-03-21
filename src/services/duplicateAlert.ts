@@ -39,11 +39,6 @@ export function createDuplicateAlert(apiKey: string) {
 <p><b>Type:</b> ${input.duplicateType}</p>
 <p><b>Matched file:</b> ${input.matchedPath ?? "—"}</p>`,
       });
-
-      logger.info(
-        { to, projectName: input.projectName, fileName: input.fileName },
-        "Duplicate alert sent",
-      );
     },
   };
 }

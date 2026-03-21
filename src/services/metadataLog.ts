@@ -9,16 +9,16 @@ export interface ProcessedFileEvent {
   /** How the project was resolved: user-context | chat-context | tag | ai | fallback */
   readonly projectResolutionSource: string;
   readonly needsManualReview: boolean;
-  readonly originalFilename?: string;
+  readonly originalFilename?: string | undefined;
   readonly fileName: string;
   readonly relativePath: string;
   readonly rootFolder: "Photos" | "Videos" | "Renders" | "Final";
-  readonly phase?: "Demo" | "Framing" | "Electrical" | "Finish";
+  readonly phase?: "Demo" | "Framing" | "Electrical" | "Finish" | undefined;
   readonly category: "image" | "video" | "pdf" | "unknown";
   readonly confidence: number;
   readonly isDuplicate: boolean;
-  readonly duplicateType?: "exact" | "perceptual";
-  readonly duplicateMatchedPath?: string;
+  readonly duplicateType?: "exact" | "perceptual" | undefined;
+  readonly duplicateMatchedPath?: string | undefined;
   readonly classificationSource: "ai" | "fallback";
 }
 

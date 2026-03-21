@@ -54,6 +54,8 @@ const processedEntrySchema = z.object({
   duplicateType: z.string().optional(),
   duplicateMatchedPath: z.string().optional(),
   classificationSource: z.string(),
+  // Present on entries written after the routing-mode fix.
+  finalRoutingMode: z.string().optional(),
 });
 
 const activityEntrySchema = z.object({
@@ -91,6 +93,14 @@ const reportEntrySchema = z.object({
 
 const MANUAL_REVIEW_SLUG = "ManualReview";
 
+/** True when the entry was ultimately routed to any Manual Review folder. */
+function isManualReviewEntry(e: { projectName: string; finalRoutingMode?: string | undefined }): boolean {
+  if (e.projectName === MANUAL_REVIEW_SLUG) return true;
+  if (e.finalRoutingMode === "global-manual-review") return true;
+  if (e.finalRoutingMode === "project-manual-review") return true;
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
@@ -127,13 +137,11 @@ async function handleOverview(res: http.ServerResponse): Promise<void> {
 
   const unique = processed.filter((e) => !e.isDuplicate);
   const duplicates = processed.filter((e) => e.isDuplicate);
-  const manualReview = processed.filter(
-    (e) => e.projectName === MANUAL_REVIEW_SLUG,
-  );
+  const manualReview = processed.filter(isManualReviewEntry);
 
   const affectedProjects = new Set(
     processed
-      .filter((e) => e.projectName !== MANUAL_REVIEW_SLUG)
+      .filter((e) => !isManualReviewEntry(e))
       .map((e) => e.projectName),
   ).size;
 
@@ -146,7 +154,7 @@ async function handleOverview(res: http.ServerResponse): Promise<void> {
     { total: number; duplicates: number; manualReview: number }
   >();
   for (const e of processed) {
-    if (e.projectName === MANUAL_REVIEW_SLUG) continue;
+    if (isManualReviewEntry(e)) continue;
     const cur = projectMap.get(e.projectName) ?? {
       total: 0,
       duplicates: 0,
@@ -211,10 +219,7 @@ async function handleManualReview(res: http.ServerResponse): Promise<void> {
     appPaths.processedLogFile,
     processedEntrySchema,
   );
-  json(
-    res,
-    processed.filter((e) => e.projectName === MANUAL_REVIEW_SLUG).reverse(),
-  );
+  json(res, processed.filter(isManualReviewEntry).reverse());
 }
 
 async function handleReports(res: http.ServerResponse): Promise<void> {

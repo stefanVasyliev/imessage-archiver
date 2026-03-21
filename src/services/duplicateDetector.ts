@@ -49,7 +49,13 @@ interface HashIndex {
 // ---------------------------------------------------------------------------
 
 const PERCEPTUAL_DISTANCE_THRESHOLD = 8;
-const PERCEPTUAL_HASH_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic"]);
+const PERCEPTUAL_HASH_EXTENSIONS = new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".heic",
+]);
 const EMPTY_INDEX: HashIndex = { version: 1, entries: [] };
 
 // ---------------------------------------------------------------------------
@@ -60,7 +66,10 @@ function computeSha256(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
-function canComputePerceptualHash(filePath: string, category: FileCategory): boolean {
+function canComputePerceptualHash(
+  filePath: string,
+  category: FileCategory,
+): boolean {
   return (
     category === "image" &&
     PERCEPTUAL_HASH_EXTENSIONS.has(path.extname(filePath).toLowerCase())
@@ -127,7 +136,10 @@ async function readIndex(): Promise<HashIndex> {
   const raw: unknown = await fs.readJson(appPaths.hashesFile);
 
   if (typeof raw !== "object" || raw === null) {
-    logger.warn({ path: appPaths.hashesFile }, "Hash index is corrupt — recreating");
+    logger.warn(
+      { path: appPaths.hashesFile },
+      "Hash index is corrupt — recreating",
+    );
     return EMPTY_INDEX;
   }
 
@@ -143,7 +155,9 @@ async function appendToIndex(
   index: HashIndex,
   entry: StoredHashEntry,
 ): Promise<void> {
-  const alreadyIndexed = index.entries.some((e) => e.filePath === entry.filePath);
+  const alreadyIndexed = index.entries.some(
+    (e) => e.filePath === entry.filePath,
+  );
   if (alreadyIndexed) return;
 
   await fs.ensureFile(appPaths.hashesFile);
@@ -208,11 +222,6 @@ export async function detectDuplicate(
       createdAtIso: new Date().toISOString(),
     });
 
-    logger.debug(
-      { filePath: input.filePath, matchedFilePath: exactMatch.filePath },
-      "Exact duplicate detected",
-    );
-
     return {
       isDuplicate: true,
       duplicateType: "exact",
@@ -249,7 +258,10 @@ export async function detectDuplicate(
   });
 
   if (perceptualHash !== undefined) {
-    const perceptualMatch = findBestPerceptualMatch(index.entries, perceptualHash);
+    const perceptualMatch = findBestPerceptualMatch(
+      index.entries,
+      perceptualHash,
+    );
 
     if (perceptualMatch) {
       logger.debug(
