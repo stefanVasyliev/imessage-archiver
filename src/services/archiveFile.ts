@@ -1,5 +1,6 @@
 import fs from "fs-extra";
 import * as path from "node:path";
+import { logger } from "../utils/logger.js";
 
 async function getUniqueDestinationPath(
   targetDirectory: string,
@@ -32,7 +33,22 @@ export async function moveToDirectory(
     fileName,
   );
 
-  await fs.move(sourcePath, destinationPath, { overwrite: false });
+  try {
+    await fs.move(sourcePath, destinationPath, { overwrite: false });
+  } catch (err: unknown) {
+    logger.error(
+      {
+        error: err,
+        operation: "moveToDirectory",
+        sourcePath,
+        destinationPath,
+        targetDirectory,
+        fileName,
+      },
+      "File move failed",
+    );
+    throw err;
+  }
 
   return destinationPath;
 }

@@ -309,7 +309,16 @@ async function processNewMessages(): Promise<void> {
     // that project-defining messages sent before the last processed attachment
     // ROWID are still captured (e.g. after restart or pointer advancement).
     // recentRows is newest-first; we walk it to find the most recent useful message.
-    const recentRows = getRecentTextMessages(db, 30);
+    let recentRows: TextMessageRow[];
+    try {
+      recentRows = getRecentTextMessages(db, 30);
+    } catch (err: unknown) {
+      logger.error(
+        { error: err, operation: "getRecentTextMessages" },
+        "Failed to query recent text messages for context seeding — continuing with empty context",
+      );
+      recentRows = [];
+    }
 
     {
       // Collect up to 5 recent non-matching messages as raw hints.
@@ -360,7 +369,20 @@ async function processNewMessages(): Promise<void> {
     // ---- New text-message pass ----
     // Handles messages strictly newer than lastProcessedMessageRowId.
     // Always stores raw hint; upgrades to resolved context when a project matches.
-    const textRows = getNewTextMessages(db, state.lastProcessedMessageRowId);
+    let textRows: TextMessageRow[];
+    try {
+      textRows = getNewTextMessages(db, state.lastProcessedMessageRowId);
+    } catch (err: unknown) {
+      logger.error(
+        {
+          error: err,
+          operation: "getNewTextMessages",
+          lastProcessedMessageRowId: state.lastProcessedMessageRowId,
+        },
+        "Failed to query new text messages — skipping text-message pass",
+      );
+      textRows = [];
+    }
 
     for (const textRow of textRows) {
       if (!textRow.text) continue;
@@ -418,7 +440,21 @@ async function processNewMessages(): Promise<void> {
       }
     }
 
-    const rows = getNewAttachmentRows(db, state.lastProcessedMessageRowId);
+    let rows: RawAttachmentRow[];
+    try {
+      rows = getNewAttachmentRows(db, state.lastProcessedMessageRowId);
+    } catch (err: unknown) {
+      logger.error(
+        {
+          error: err,
+          operation: "getNewAttachmentRows",
+          lastProcessedMessageRowId: state.lastProcessedMessageRowId,
+          chatId: env.TARGET_CHAT_ID,
+        },
+        "Failed to query new attachment rows — aborting poll cycle",
+      );
+      return;
+    }
 
     let newestRowId = state.lastProcessedMessageRowId;
 
@@ -429,8 +465,16 @@ async function processNewMessages(): Promise<void> {
         await processAttachment(row, knownProjects, db);
       } catch (error: unknown) {
         logger.error(
-          { error, messageRowId: row.messageRowId },
-          "Failed to process attachment — skipping",
+          {
+            error,
+            operation: "processAttachment",
+            messageRowId: row.messageRowId,
+            attachmentRowId: row.attachmentRowId,
+            chatId: row.chatId,
+            senderId: getSenderId(row),
+            attachmentFilename: row.attachmentFilename,
+          },
+          "Unexpected error processing attachment — skipping",
         );
       }
     }
@@ -451,7 +495,20 @@ async function processAttachment(
   // ---- File extraction ----
 
   const extracted = await extractAttachment(row);
-  if (!extracted) return;
+  if (!extracted) {
+    logger.error(
+      {
+        operation: "extractAttachment",
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        chatId: row.chatId,
+        senderId,
+        attachmentFilename: row.attachmentFilename,
+      },
+      "Attachment extraction returned null — file missing or unreadable, skipping",
+    );
+    return;
+  }
 
   const category = getFileCategory(extracted.destinationPath);
 
@@ -542,31 +599,70 @@ async function processAttachment(
   // DB at processing time — guarantees context even when the in-memory store is
   // empty (restart, same-batch race, or first run).
 
-  const lastSenderMessage = getLastMeaningfulTextMessageBySenderBefore(db, {
-    isFromMe: row.isFromMe,
-    handleId: row.handleId,
-    chatId: row.chatId,
-    beforeRowId: row.messageRowId,
-  });
+  let lastSenderMessage: string | null = null;
+  try {
+    lastSenderMessage = getLastMeaningfulTextMessageBySenderBefore(db, {
+      isFromMe: row.isFromMe,
+      handleId: row.handleId,
+      chatId: row.chatId,
+      beforeRowId: row.messageRowId,
+    });
+  } catch (err: unknown) {
+    logger.error(
+      {
+        error: err,
+        operation: "getLastMeaningfulTextMessageBySenderBefore",
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        chatId: row.chatId,
+        senderId,
+        handleId: row.handleId,
+        beforeRowId: row.messageRowId,
+      },
+      "DB query for sender's last message failed — proceeding without sender context",
+    );
+  }
 
   // Results come back oldest-first from getRecentTextMessagesByChatBefore.
-  const dbChatRows = getRecentTextMessagesByChatBefore(db, {
-    chatId: row.chatId,
-    beforeRowId: row.messageRowId,
-    limit: 8,
-  });
+  let dbChatRows: TextMessageRow[] = [];
+  try {
+    dbChatRows = getRecentTextMessagesByChatBefore(db, {
+      chatId: row.chatId,
+      beforeRowId: row.messageRowId,
+      limit: 8,
+    });
+  } catch (err: unknown) {
+    logger.error(
+      {
+        error: err,
+        operation: "getRecentTextMessagesByChatBefore",
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        chatId: row.chatId,
+        beforeRowId: row.messageRowId,
+      },
+      "DB query for recent chat messages failed — proceeding without chat context",
+    );
+  }
 
   const dbContextMessages = dbChatRows.map((r) => r.text!);
 
-  console.log("[debug:sender-context-before-resolve]");
-  console.log({
-    attachmentRowId: row.attachmentRowId,
-    chatId: row.chatId,
-    senderId,
-    lastSenderMessage,
-  });
-  console.log("[debug:chat-context-before-resolve]");
-  console.log({ messages: dbContextMessages });
+  if (lastSenderMessage === null && dbContextMessages.length === 0 && env.OPENAI_API_KEY) {
+    logger.warn(
+      {
+        operation: "getRecentTextMessagesByChatBefore",
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        chatId: row.chatId,
+        senderId,
+        beforeRowId: row.messageRowId,
+        hasValidSenderContext: contextStore.getValidSender(senderId) !== null,
+        hasStaleSenderContext: contextStore.getSender(senderId) !== null,
+        hasChatContext: contextStore.getChat(row.chatId) !== null,
+      },
+      "No DB context found for this attachment — AI will proceed without text context",
+    );
+  }
 
   // Fast-path: try to resolve project from DB context before calling AI.
   // Seeds the in-memory context store so resolveProject step 1 can cache-hit.
@@ -601,13 +697,6 @@ async function processAttachment(
     }
   }
 
-  console.log("[debug:dbContextMessages-before-resolve]");
-  console.log({
-    chatId: row.chatId,
-    beforeRowId: row.messageRowId,
-    dbContextMessages,
-  });
-
   try {
     // ---- Project resolution (uses preview for AI inference) ----
 
@@ -628,11 +717,20 @@ async function processAttachment(
     if (resolution.needsManualReview) {
       logger.warn(
         {
+          operation: "resolveProject",
           messageRowId: row.messageRowId,
+          attachmentRowId: row.attachmentRowId,
+          chatId: row.chatId,
+          senderId,
+          originalFilename: row.attachmentFilename,
           projectName: resolution.projectName,
           source: resolution.source,
           confidence: resolution.confidence,
           reasoning: resolution.reasoning,
+          hasMessageText: row.text !== null,
+          hasLastSenderMessage: lastSenderMessage !== null,
+          dbContextMessageCount: dbContextMessages.length,
+          knownProjectsCount: knownProjects.length,
         },
         "Project unresolved — routing to manual review",
       );
@@ -733,15 +831,33 @@ async function processAttachment(
         ? undefined
         : naming.phaseFolder;
 
-    const { dir: targetDirectory } = await resolveTargetDirectory({
+    const { dir: targetDirectory, routingMode } = await resolveTargetDirectory({
       projectName,
       rootFolder: naming.rootFolder,
       phaseFolder: effectivePhase,
     });
 
-    // If routing fell back to ManualReview at the filesystem level, ensure
-    // needsManualReview reflects the true outcome regardless of what
-    // resolveProject() reported.
+    // Detect silent degradation: project was resolved but filesystem routing fell back.
+    if (!resolution.needsManualReview && routingMode !== "project") {
+      logger.error(
+        {
+          operation: "resolveTargetDirectory",
+          messageRowId: row.messageRowId,
+          attachmentRowId: row.attachmentRowId,
+          chatId: row.chatId,
+          senderId,
+          resolvedProjectName: projectName,
+          resolutionSource: resolution.source,
+          resolutionConfidence: resolution.confidence,
+          targetDirectory,
+          routingMode,
+          rootFolder: naming.rootFolder,
+          effectivePhase: effectivePhase ?? null,
+          originalFilename: row.attachmentFilename,
+        },
+        "Project resolved but file routed to ManualReview at filesystem level — project folder or subfolder missing",
+      );
+    }
 
     // ---- Duplicate detection ----
 
@@ -791,34 +907,48 @@ async function processAttachment(
 
     // ---- Metadata log ----
 
-    await metadataLog.write({
-      processedAtIso: new Date().toISOString(),
-      messageRowId: row.messageRowId,
-      senderId,
-      projectName,
-      projectResolutionSource: resolution.source,
-      needsManualReview: resolution.needsManualReview,
-      ...(row.attachmentFilename !== null
-        ? { originalFilename: row.attachmentFilename }
-        : {}),
-      fileName: naming.fileName,
-      relativePath: finalPath,
-      rootFolder: naming.rootFolder,
-      ...(naming.phaseFolder !== undefined
-        ? { phase: naming.phaseFolder }
-        : {}),
-      category,
-      confidence: classification.confidence,
-      isDuplicate: duplicate.isDuplicate,
-      ...(duplicate.duplicateType !== undefined
-        ? { duplicateType: duplicate.duplicateType }
-        : {}),
-      ...(duplicate.matchedFilePath !== undefined
-        ? { duplicateMatchedPath: duplicate.matchedFilePath }
-        : {}),
-      classificationSource:
-        classification.classificationSource === "ai" ? "ai" : "fallback",
-    });
+    try {
+      await metadataLog.write({
+        processedAtIso: new Date().toISOString(),
+        messageRowId: row.messageRowId,
+        senderId,
+        projectName,
+        projectResolutionSource: resolution.source,
+        needsManualReview: resolution.needsManualReview,
+        ...(row.attachmentFilename !== null
+          ? { originalFilename: row.attachmentFilename }
+          : {}),
+        fileName: naming.fileName,
+        relativePath: finalPath,
+        rootFolder: naming.rootFolder,
+        ...(naming.phaseFolder !== undefined
+          ? { phase: naming.phaseFolder }
+          : {}),
+        category,
+        confidence: classification.confidence,
+        isDuplicate: duplicate.isDuplicate,
+        ...(duplicate.duplicateType !== undefined
+          ? { duplicateType: duplicate.duplicateType }
+          : {}),
+        ...(duplicate.matchedFilePath !== undefined
+          ? { duplicateMatchedPath: duplicate.matchedFilePath }
+          : {}),
+        classificationSource:
+          classification.classificationSource === "ai" ? "ai" : "fallback",
+      });
+    } catch (err: unknown) {
+      logger.error(
+        {
+          error: err,
+          operation: "metadataLog.write",
+          messageRowId: row.messageRowId,
+          attachmentRowId: row.attachmentRowId,
+          fileName: naming.fileName,
+          finalPath,
+        },
+        "Metadata log write failed",
+      );
+    }
 
     void activityLog.write({
       ts: new Date().toISOString(),

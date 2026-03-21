@@ -36,14 +36,40 @@ export async function extractAttachment(
   const sourceExists = await fs.pathExists(sourcePath);
 
   if (!sourceExists) {
-    logger.warn({ sourcePath }, "Attachment source file does not exist");
+    logger.error(
+      {
+        operation: "extractAttachment",
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        chatId: row.chatId,
+        handleId: row.handleId,
+        attachmentFilename: row.attachmentFilename,
+        sourcePath,
+      },
+      "Attachment source file does not exist — cannot extract",
+    );
     return null;
   }
 
   await fs.ensureDir(appPaths.tempIncoming);
 
-
-  await fs.copy(sourcePath, destinationPath, { overwrite: true });
+  try {
+    await fs.copy(sourcePath, destinationPath, { overwrite: true });
+  } catch (err: unknown) {
+    logger.error(
+      {
+        error: err,
+        operation: "extractAttachment",
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        chatId: row.chatId,
+        sourcePath,
+        destinationPath,
+      },
+      "Failed to copy attachment to staging directory",
+    );
+    return null;
+  }
 
   return {
     sourcePath,

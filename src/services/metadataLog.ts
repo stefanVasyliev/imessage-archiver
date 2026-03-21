@@ -1,5 +1,6 @@
 import { promises as fsp } from "node:fs";
 import * as path from "node:path";
+import { logger } from "../utils/logger.js";
 
 export interface ProcessedFileEvent {
   readonly processedAtIso: string;
@@ -25,8 +26,22 @@ export interface ProcessedFileEvent {
 export function createMetadataLog(filePath: string) {
   return {
     async write(event: ProcessedFileEvent): Promise<void> {
-      await fsp.mkdir(path.dirname(filePath), { recursive: true });
-      await fsp.appendFile(filePath, JSON.stringify(event) + "\n", "utf8");
+      try {
+        await fsp.mkdir(path.dirname(filePath), { recursive: true });
+        await fsp.appendFile(filePath, JSON.stringify(event) + "\n", "utf8");
+      } catch (err: unknown) {
+        logger.error(
+          {
+            error: err,
+            operation: "metadataLog.write",
+            filePath,
+            messageRowId: event.messageRowId,
+            fileName: event.fileName,
+          },
+          "Metadata log write failed",
+        );
+        throw err;
+      }
     },
   };
 }

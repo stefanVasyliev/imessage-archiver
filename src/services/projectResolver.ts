@@ -89,7 +89,15 @@ export async function getKnownProjects(): Promise<string[]> {
           !EXCLUDED_DIRS.has(e.name),
       )
       .map((e) => e.name);
-  } catch {
+  } catch (err: unknown) {
+    logger.error(
+      {
+        error: err,
+        operation: "getKnownProjects",
+        rootPath: appPaths.root,
+      },
+      "Failed to read known projects directory — all attachments will route to ManualReview",
+    );
     return [];
   }
 }
@@ -547,14 +555,39 @@ export async function resolveProject(params: {
         };
       }
 
-      logger.info(
-        { reasoning: ai.reasoning, source: "ai" },
-        "AI could not determine project — routing to Manual Review",
+      logger.warn(
+        {
+          operation: "inferProjectViaAI",
+          reasoning: ai.reasoning,
+          source: "ai",
+          senderId: params.senderId,
+          chatId: params.chatId,
+          knownProjectsCount: params.knownProjects.length,
+          hasPreview: previewImagePath !== null,
+          hasMessageText: params.messageText !== null,
+          hasSenderContext: senderContext !== null,
+          recentChatMessagesCount: recentChatMessages.length,
+        },
+        "AI could not identify project — routing to Manual Review",
       );
     } catch (error: unknown) {
-      logger.warn(
-        { error: error instanceof Error ? error.message : String(error) },
-        "AI project inference failed — falling back to Manual Review",
+      logger.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+          errorStack: error instanceof Error ? error.stack : undefined,
+          operation: "inferProjectViaAI",
+          model: env.OPENAI_MODEL ?? "gpt-4.1-mini",
+          senderId: params.senderId,
+          chatId: params.chatId,
+          knownProjectsCount: params.knownProjects.length,
+          hasPreview: previewImagePath !== null,
+          hasMessageText: params.messageText !== null,
+          hasLastSenderMessage: params.lastSenderMessage !== null,
+          hasSenderContext: senderContext !== null,
+          recentChatMessagesCount: recentChatMessages.length,
+          originalFilename: params.originalFilename,
+        },
+        "AI project inference threw an exception — falling back to Manual Review",
       );
     }
   }
