@@ -523,6 +523,26 @@ export async function resolveProject(params: {
       recentChatMessages.push(senderContext.rawMessageText);
     }
 
+    logger.info(
+      {
+        operation: "inferProjectViaAI:inputs",
+        senderId: params.senderId,
+        chatId: params.chatId,
+        hasLastSenderMessage: (params.lastSenderMessage ?? null) !== null,
+        lastSenderMessage: params.lastSenderMessage?.slice(0, 120) ?? null,
+        hasMessageText: params.messageText !== null,
+        messageText: params.messageText?.slice(0, 120) ?? null,
+        contextMessageText: contextMessageText?.slice(0, 120) ?? null,
+        recentChatMessagesCount: recentChatMessages.length,
+        recentChatMessages: recentChatMessages.map((m) => m.slice(0, 80)),
+        originalFilename: params.originalFilename,
+        hasPreview: previewImagePath !== null,
+        knownProjectsCount: params.knownProjects.length,
+        knownProjects: params.knownProjects,
+      },
+      "Calling AI for project inference",
+    );
+
     try {
       const ai = await inferProjectViaAI({
         lastSenderMessage: params.lastSenderMessage ?? null,
@@ -533,6 +553,22 @@ export async function resolveProject(params: {
         knownProjects: params.knownProjects,
         previewImagePath,
       });
+
+      logger.info(
+        {
+          operation: "inferProjectViaAI:result",
+          senderId: params.senderId,
+          chatId: params.chatId,
+          projectName: ai.projectName,
+          confidence: ai.confidence,
+          confidenceThreshold: AI_CONFIDENCE_THRESHOLD,
+          meetsThreshold: ai.projectName !== null && ai.confidence >= AI_CONFIDENCE_THRESHOLD,
+          reasoning: ai.reasoning,
+          suggestedPhase: ai.suggestedPhase ?? null,
+          suggestedLocation: ai.suggestedLocation ?? null,
+        },
+        "AI project inference result",
+      );
 
       if (ai.projectName !== null) {
         const confident = ai.confidence >= AI_CONFIDENCE_THRESHOLD;

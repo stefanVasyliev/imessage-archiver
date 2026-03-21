@@ -175,6 +175,11 @@ async function resolveTargetDirectory(params: {
     };
   }
 
+  logger.info(
+    { operation: "resolveTargetDirectory", projectName, projectRoot },
+    "[routing] Project root exists on disk",
+  );
+
   const projectManualReview = path.join(projectRoot, "Manual Review");
 
   // Renders / Final: no phase subfolder needed.
@@ -188,6 +193,10 @@ async function resolveTargetDirectory(params: {
       await fs.ensureDir(projectManualReview);
       return { dir: projectManualReview, routingMode: "project-manual-review" };
     }
+    logger.info(
+      { operation: "resolveTargetDirectory", projectName, rootFolder, targetDir, routingMode: "project" },
+      "[routing] Routing to Renders/Final folder",
+    );
     return { dir: targetDir, routingMode: "project" };
   }
 
@@ -201,6 +210,11 @@ async function resolveTargetDirectory(params: {
     await fs.ensureDir(projectManualReview);
     return { dir: projectManualReview, routingMode: "project-manual-review" };
   }
+
+  logger.info(
+    { operation: "resolveTargetDirectory", projectName, rootFolder, rootDir },
+    "[routing] Root folder (Photos/Videos) exists on disk",
+  );
 
   // Phase unknown — fall back to root folder (Photos/ or Videos/).
   if (phaseFolder === undefined) {
@@ -220,6 +234,10 @@ async function resolveTargetDirectory(params: {
     );
     return { dir: rootDir, routingMode: "project" };
   }
+  logger.info(
+    { operation: "resolveTargetDirectory", projectName, rootFolder, phaseFolder, phaseDir, routingMode: "project" },
+    "[routing] Routing to phase folder",
+  );
   return { dir: phaseDir, routingMode: "project" };
 }
 
@@ -303,6 +321,15 @@ async function processNewMessages(): Promise<void> {
   try {
     const state = await readState();
     const knownProjects = await getKnownProjects();
+    logger.info(
+      {
+        operation: "getKnownProjects",
+        count: knownProjects.length,
+        projects: knownProjects,
+        storageRoot: appPaths.root,
+      },
+      "Known projects loaded",
+    );
 
     // ---- Context seeding pass (history-scan) ----
     // Read the 30 most recent text messages regardless of the state pointer so
@@ -319,6 +346,25 @@ async function processNewMessages(): Promise<void> {
       );
       recentRows = [];
     }
+
+    logger.info(
+      {
+        operation: "getRecentTextMessages",
+        count: recentRows.length,
+        rowIdRange:
+          recentRows.length > 0
+            ? {
+                newest: recentRows.at(0)?.messageRowId ?? null,
+                oldest: recentRows.at(-1)?.messageRowId ?? null,
+              }
+            : null,
+        senderIds: [...new Set(recentRows.map((r) => r.handleId ?? "me"))],
+        texts: recentRows.slice(0, 5).map((r) => r.text?.slice(0, 60) ?? null),
+      },
+      recentRows.length === 0
+        ? "No recent text rows found for context seeding"
+        : "Recent text rows fetched for context seeding",
+    );
 
     {
       // Collect up to 5 recent non-matching messages as raw hints.
@@ -383,6 +429,25 @@ async function processNewMessages(): Promise<void> {
       );
       textRows = [];
     }
+
+    logger.info(
+      {
+        operation: "getNewTextMessages",
+        lastProcessedMessageRowId: state.lastProcessedMessageRowId,
+        chatId: env.TARGET_CHAT_ID,
+        count: textRows.length,
+        rowIdRange:
+          textRows.length > 0
+            ? {
+                min: textRows.at(0)?.messageRowId ?? null,
+                max: textRows.at(-1)?.messageRowId ?? null,
+              }
+            : null,
+        senderIds: [...new Set(textRows.map((r) => r.handleId ?? "me"))],
+        texts: textRows.map((r) => ({ rowId: r.messageRowId, text: r.text?.slice(0, 80) ?? null })),
+      },
+      textRows.length === 0 ? "No new text messages found" : "New text messages fetched",
+    );
 
     for (const textRow of textRows) {
       if (!textRow.text) continue;
@@ -456,6 +521,32 @@ async function processNewMessages(): Promise<void> {
       return;
     }
 
+    logger.info(
+      {
+        operation: "getNewAttachmentRows",
+        lastProcessedMessageRowId: state.lastProcessedMessageRowId,
+        chatId: env.TARGET_CHAT_ID,
+        count: rows.length,
+        rowIdRange:
+          rows.length > 0
+            ? {
+                min: rows.at(0)?.messageRowId ?? null,
+                max: rows.at(-1)?.messageRowId ?? null,
+              }
+            : null,
+        attachments: rows.map((r) => ({
+          messageRowId: r.messageRowId,
+          attachmentRowId: r.attachmentRowId,
+          handleId: r.handleId,
+          isFromMe: r.isFromMe,
+          filename: r.attachmentFilename,
+          mimeType: r.attachmentMimeType,
+          chatDisplayName: r.chatDisplayName,
+        })),
+      },
+      rows.length === 0 ? "No new attachment rows found" : "New attachment rows fetched",
+    );
+
     let newestRowId = state.lastProcessedMessageRowId;
 
     for (const row of rows) {
@@ -491,6 +582,24 @@ async function processAttachment(
   db: Database.Database,
 ): Promise<void> {
   const senderId = getSenderId(row);
+
+  logger.info(
+    {
+      operation: "processAttachment:start",
+      messageRowId: row.messageRowId,
+      attachmentRowId: row.attachmentRowId,
+      chatId: row.chatId,
+      senderId,
+      handleId: row.handleId,
+      isFromMe: row.isFromMe,
+      originalFilename: row.attachmentFilename,
+      mimeType: row.attachmentMimeType,
+      messageText: row.text?.slice(0, 120) ?? null,
+      messageGuid: row.messageGuid,
+      chatDisplayName: row.chatDisplayName,
+    },
+    "Starting attachment processing",
+  );
 
   // ---- File extraction ----
 
@@ -664,6 +773,42 @@ async function processAttachment(
     );
   }
 
+  const _chatCtxForLog = contextStore.getChat(row.chatId);
+  logger.info(
+    {
+      operation: "processAttachment:context-summary",
+      messageRowId: row.messageRowId,
+      attachmentRowId: row.attachmentRowId,
+      senderId,
+      lastSenderMessageFound: lastSenderMessage !== null,
+      lastSenderMessage: lastSenderMessage?.slice(0, 120) ?? null,
+      dbContextMessageCount: dbContextMessages.length,
+      dbContextMessages: dbContextMessages.map((m) => m.slice(0, 80)),
+      validSenderContext:
+        validSenderContext !== null
+          ? {
+              projectName: validSenderContext.projectName ?? null,
+              ageMinutes: Math.round(
+                (Date.now() - validSenderContext.setAtMs) / 60_000,
+              ),
+              textPreview: validSenderContext.rawMessageText.slice(0, 80),
+            }
+          : null,
+      chatContext:
+        _chatCtxForLog !== null
+          ? {
+              projectName: _chatCtxForLog.projectName ?? null,
+              textPreview: _chatCtxForLog.rawMessageText?.slice(0, 80) ?? null,
+              rawMessagesCount: _chatCtxForLog.rawMessages.length,
+            }
+          : null,
+      combinedMessageText: combinedMessageText?.slice(0, 120) ?? null,
+      category,
+      sharedPreviewPath,
+    },
+    "Context summary before project resolution",
+  );
+
   // Fast-path: try to resolve project from DB context before calling AI.
   // Seeds the in-memory context store so resolveProject step 1 can cache-hit.
   if (dbContextMessages.length > 0) {
@@ -700,6 +845,25 @@ async function processAttachment(
   try {
     // ---- Project resolution (uses preview for AI inference) ----
 
+    logger.info(
+      {
+        operation: "resolveProject:inputs",
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        senderId,
+        chatId: row.chatId,
+        messageText: row.text?.slice(0, 120) ?? null,
+        originalFilename: row.attachmentFilename,
+        lastSenderMessage: lastSenderMessage?.slice(0, 120) ?? null,
+        dbContextMessageCount: dbContextMessages.length,
+        dbContextMessages: dbContextMessages.map((m) => m.slice(0, 80)),
+        hasPreviewImage: sharedPreviewPath !== null,
+        previewPath: sharedPreviewPath,
+        knownProjectsCount: knownProjects.length,
+      },
+      "Calling resolveProject",
+    );
+
     const resolution = await resolveProject({
       senderId,
       chatId: row.chatId,
@@ -735,6 +899,23 @@ async function processAttachment(
         "Project unresolved — routing to manual review",
       );
     }
+
+    logger.info(
+      {
+        operation: "resolveProject:result",
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        senderId,
+        projectName: resolution.projectName,
+        source: resolution.source,
+        confidence: resolution.confidence,
+        needsManualReview: resolution.needsManualReview,
+        reasoning: resolution.reasoning,
+        suggestedPhase: resolution.suggestedPhase ?? null,
+        suggestedLocation: resolution.suggestedLocation ?? null,
+      },
+      "Project resolution result",
+    );
 
     const projectName = resolution.projectName;
 
@@ -904,6 +1085,23 @@ async function processAttachment(
         naming.fileName,
       );
     }
+
+    logger.info(
+      {
+        operation: "moveToDirectory:result",
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        senderId,
+        fileName: naming.fileName,
+        sourcePath: extracted.destinationPath,
+        targetDirectory,
+        finalPath,
+        routingMode,
+        isDuplicate: duplicate.isDuplicate,
+        duplicateType: duplicate.duplicateType ?? null,
+      },
+      "File moved successfully",
+    );
 
     // ---- Metadata log ----
 
