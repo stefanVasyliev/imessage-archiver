@@ -32,6 +32,18 @@ export interface TextMessageRow {
 // Queries
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns the current MAX(ROWID) from the message table.
+ * Used at startup to initialize the state pointer so only messages arriving
+ * AFTER the bot starts are processed.  Returns 0 if the table is empty.
+ */
+export function getCurrentMaxMessageRowId(db: Database.Database): number {
+  const row = db
+    .prepare("SELECT MAX(ROWID) AS maxId FROM message")
+    .get() as { maxId: number | null };
+  return row?.maxId ?? 0;
+}
+
 export function getNewAttachmentRows(
   db: Database.Database,
   lastProcessedMessageRowId: number,

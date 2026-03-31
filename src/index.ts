@@ -28,6 +28,7 @@ import {
   getRecentTextMessages,
   getLastMeaningfulTextMessageBySenderBefore,
   getRecentTextMessagesByChatBefore,
+  getCurrentMaxMessageRowId,
   type RawAttachmentRow,
   type TextMessageRow,
 } from "./services/pollMessages.js";
@@ -1179,6 +1180,65 @@ function scheduleWeeklyReport(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Startup state initialization
+// ---------------------------------------------------------------------------
+
+/**
+ * Determines the correct starting ROWID before the first poll cycle:
+ *
+ *   • START_FROM_NOW=true  → always reset to the current MAX(ROWID), ignoring
+ *                            any saved state.  No historical messages processed.
+ *   • No state file        → initialize from MAX(ROWID).  Same effect as above
+ *                            on a fresh install or after state is deleted.
+ *   • State file exists    → resume from the saved pointer (normal restart).
+ */
+async function initializeStartupState(
+  db: Database.Database,
+): Promise<void> {
+  const maxRowId = getCurrentMaxMessageRowId(db);
+
+  logger.info(
+    {
+      operation: "initializeState",
+      maxRowId,
+      startFromNow: env.START_FROM_NOW,
+      stateFile: appPaths.stateFile,
+    },
+    "Current MAX(message.ROWID) at startup",
+  );
+
+  if (env.START_FROM_NOW) {
+    logger.info(
+      { operation: "initializeState", maxRowId },
+      "START_FROM_NOW=true — resetting state to current MAX(ROWID), all history skipped",
+    );
+    await writeState({ lastProcessedMessageRowId: maxRowId });
+    return;
+  }
+
+  const stateExists = await fs.pathExists(appPaths.stateFile);
+  if (!stateExists) {
+    logger.info(
+      { operation: "initializeState", maxRowId },
+      "No state file found — initializing from MAX(ROWID), only new messages will be processed",
+    );
+    await writeState({ lastProcessedMessageRowId: maxRowId });
+    return;
+  }
+
+  const state = await readState();
+  logger.info(
+    {
+      operation: "initializeState",
+      lastProcessedMessageRowId: state.lastProcessedMessageRowId,
+      maxRowId,
+      pendingRowGap: maxRowId - state.lastProcessedMessageRowId,
+    },
+    "Resuming from saved state",
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1190,6 +1250,14 @@ async function main(): Promise<void> {
 
   await ensureDirectories();
   scheduleWeeklyReport();
+
+  const initDb = openChatDb();
+  try {
+    await initializeStartupState(initDb);
+  } finally {
+    initDb.close();
+  }
+
   await processNewMessages();
 
   setInterval(() => {

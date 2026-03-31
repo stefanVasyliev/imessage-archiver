@@ -21,6 +21,15 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().optional(),
   DASHBOARD_PORT: z.coerce.number().int().positive().default(3000),
+  /**
+   * When "true", always reset the state pointer to the current MAX(ROWID) on
+   * startup — guaranteeing that no historical messages or attachments are ever
+   * processed, regardless of any saved state file.
+   */
+  START_FROM_NOW: z
+    .string()
+    .default("false")
+    .transform((v) => v.toLowerCase() === "true"),
 });
 
 export const env = envSchema.parse(process.env);
