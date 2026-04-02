@@ -3,8 +3,8 @@ import fs from "fs-extra";
 import * as path from "node:path";
 import { env } from "./config/env.js";
 import type Database from "better-sqlite3";
-import { openChatDb } from "./db/chatDb.js";
-import { readState, writeState } from "./db/stateStore.js";
+import { openChatDb, getCurrentMaxMessageRowId } from "./db/chatDb.js";
+import { readState, writeState, initializeStartupState } from "./db/stateStore.js";
 import {
   classifyAttachment,
   type ClassificationResult,
@@ -27,7 +27,6 @@ import {
   getNewTextMessages,
   getRecentTextMessages,
   getLastMeaningfulTextMessageBySenderBefore,
-  getRecentTextMessagesByChatBefore,
   type RawAttachmentRow,
   type TextMessageRow,
 } from "./services/pollMessages.js";
@@ -121,6 +120,7 @@ function buildRenderClassification(): ClassificationResult {
     description: "Render",
     confidence: 0.9,
     classificationSource: "default-fallback",
+    action: "auto_route",
   };
 }
 
@@ -732,39 +732,14 @@ async function processAttachment(
     );
   }
 
-  // Results come back oldest-first from getRecentTextMessagesByChatBefore.
-  let dbChatRows: TextMessageRow[] = [];
-  try {
-    dbChatRows = getRecentTextMessagesByChatBefore(db, {
-      chatId: row.chatId,
-      beforeRowId: row.messageRowId,
-      limit: 8,
-    });
-  } catch (err: unknown) {
-    logger.error(
-      {
-        error: err,
-        operation: "getRecentTextMessagesByChatBefore",
-        messageRowId: row.messageRowId,
-        attachmentRowId: row.attachmentRowId,
-        chatId: row.chatId,
-        beforeRowId: row.messageRowId,
-      },
-      "DB query for recent chat messages failed — proceeding without chat context",
-    );
-  }
-
-  const dbContextMessages = dbChatRows.map((r) => r.text!);
-
-  if (lastSenderMessage === null && dbContextMessages.length === 0 && env.OPENAI_API_KEY) {
+  if (lastSenderMessage === null && env.OPENAI_API_KEY) {
     logger.warn(
       {
-        operation: "getRecentTextMessagesByChatBefore",
+        operation: "processAttachment:no-context",
         messageRowId: row.messageRowId,
         attachmentRowId: row.attachmentRowId,
         chatId: row.chatId,
         senderId,
-        beforeRowId: row.messageRowId,
         hasValidSenderContext: contextStore.getValidSender(senderId) !== null,
         hasStaleSenderContext: contextStore.getSender(senderId) !== null,
         hasChatContext: contextStore.getChat(row.chatId) !== null,
@@ -782,8 +757,6 @@ async function processAttachment(
       senderId,
       lastSenderMessageFound: lastSenderMessage !== null,
       lastSenderMessage: lastSenderMessage?.slice(0, 120) ?? null,
-      dbContextMessageCount: dbContextMessages.length,
-      dbContextMessages: dbContextMessages.map((m) => m.slice(0, 80)),
       validSenderContext:
         validSenderContext !== null
           ? {
@@ -809,36 +782,19 @@ async function processAttachment(
     "Context summary before project resolution",
   );
 
-  // Fast-path: try to resolve project from DB context before calling AI.
-  // Seeds the in-memory context store so resolveProject step 1 can cache-hit.
-  if (dbContextMessages.length > 0) {
-    const combined = dbContextMessages.join(" ");
-    const dbProject = matchProjectFromText(combined, knownProjects);
+  // Fast-path: try to resolve project from the single last sender message.
+  if (lastSenderMessage !== null) {
+    const dbProject = matchProjectFromText(lastSenderMessage, knownProjects);
     if (dbProject !== null) {
-      const matchingRow = [...dbChatRows]
-        .reverse()
-        .find(
-          (r) => matchProjectFromText(r.text ?? "", knownProjects) !== null,
-        );
-      if (matchingRow?.text) {
-        const sentAtMs =
-          appleMessageDateToDate(matchingRow.messageDate)?.getTime() ??
-          Date.now();
-        contextStore.setSender(senderId, matchingRow.text, {
-          projectName: dbProject,
-          sentAtMs,
-        });
-        contextStore.setChat(row.chatId, dbProject, matchingRow.text);
-        logger.info(
-          {
-            messageRowId: row.messageRowId,
-            senderId,
-            dbProject,
-            matchedText: matchingRow.text.slice(0, 80),
-          },
-          "[context] Project matched from DB context — context store seeded",
-        );
-      }
+      contextStore.setSender(senderId, lastSenderMessage, {
+        projectName: dbProject,
+        sentAtMs: Date.now(),
+      });
+      contextStore.setChat(row.chatId, dbProject, lastSenderMessage);
+      logger.info(
+        { messageRowId: row.messageRowId, senderId, dbProject, matchedText: lastSenderMessage.slice(0, 80) },
+        "[context] Project matched from last sender message — context store seeded",
+      );
     }
   }
 
@@ -855,8 +811,6 @@ async function processAttachment(
         messageText: row.text?.slice(0, 120) ?? null,
         originalFilename: row.attachmentFilename,
         lastSenderMessage: lastSenderMessage?.slice(0, 120) ?? null,
-        dbContextMessageCount: dbContextMessages.length,
-        dbContextMessages: dbContextMessages.map((m) => m.slice(0, 80)),
         hasPreviewImage: sharedPreviewPath !== null,
         previewPath: sharedPreviewPath,
         knownProjectsCount: knownProjects.length,
@@ -872,7 +826,6 @@ async function processAttachment(
       originalFilename: row.attachmentFilename,
       knownProjects,
       lastSenderMessage,
-      dbContextMessages,
       ...(sharedPreviewPath !== null
         ? { previewImagePath: sharedPreviewPath }
         : {}),
@@ -893,7 +846,6 @@ async function processAttachment(
           reasoning: resolution.reasoning,
           hasMessageText: row.text !== null,
           hasLastSenderMessage: lastSenderMessage !== null,
-          dbContextMessageCount: dbContextMessages.length,
           knownProjectsCount: knownProjects.length,
         },
         "Project unresolved — routing to manual review",
@@ -977,6 +929,7 @@ async function processAttachment(
         messageText: combinedMessageText,
         originalFilename: row.attachmentFilename,
         projectName,
+        knownProjects,
         ...(chatHintText !== null ? { chatHintText } : {}),
         // Pass the shared preview — classifier will not clean it up.
         ...(sharedPreviewPath !== null
@@ -1012,8 +965,13 @@ async function processAttachment(
         ? undefined
         : naming.phaseFolder;
 
+    // Classifier action=manual_review means low confidence — escalate even if
+    // the project resolver was confident.
+    const classifierForcesManualReview =
+      !renderDetected && classification.action === "manual_review";
+
     const { dir: targetDirectory, routingMode } = await resolveTargetDirectory({
-      projectName,
+      projectName: classifierForcesManualReview ? MANUAL_REVIEW_PROJECT : projectName,
       rootFolder: naming.rootFolder,
       phaseFolder: effectivePhase,
     });
@@ -1112,7 +1070,7 @@ async function processAttachment(
         senderId,
         projectName,
         projectResolutionSource: resolution.source,
-        needsManualReview: resolution.needsManualReview,
+        needsManualReview: resolution.needsManualReview || classifierForcesManualReview,
         ...(row.attachmentFilename !== null
           ? { originalFilename: row.attachmentFilename }
           : {}),

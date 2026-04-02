@@ -21,6 +21,10 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().optional(),
   DASHBOARD_PORT: z.coerce.number().int().positive().default(3000),
+  START_FROM_NOW: z
+    .string()
+    .transform((v) => v === "true" || v === "1")
+    .default("false"),
 });
 
 export const env = envSchema.parse(process.env);

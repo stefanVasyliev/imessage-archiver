@@ -1,6 +1,7 @@
 import fs from "fs-extra";
 import { appPaths } from "../utils/filePaths.js";
 import { logger } from "../utils/logger.js";
+import { env } from "../config/env.js";
 
 export interface AppState {
   lastProcessedMessageRowId: number;
@@ -56,4 +57,54 @@ export async function readState(): Promise<AppState> {
 export async function writeState(state: AppState): Promise<void> {
   await fs.ensureFile(appPaths.stateFile);
   await fs.writeJson(appPaths.stateFile, state, { spaces: 2 });
+}
+
+/**
+ * Called once at startup.
+ *
+ * - If START_FROM_NOW=true → always reset to `currentMaxRowId`.
+ * - If state file does not exist → initialize from `currentMaxRowId` (safe first run).
+ * - Otherwise → return the persisted state as-is.
+ *
+ * `currentMaxRowId` must be read from the live DB before calling this function.
+ */
+export async function initializeStartupState(
+  currentMaxRowId: number,
+): Promise<AppState> {
+  if (env.START_FROM_NOW) {
+    const state: AppState = { lastProcessedMessageRowId: currentMaxRowId };
+    await writeState(state);
+    logger.info(
+      { currentMaxRowId },
+      "START_FROM_NOW enabled — resetting state to current max ROWID",
+    );
+    logger.info(
+      { lastProcessedMessageRowId: currentMaxRowId },
+      "Watching for new messages after ROWID " + String(currentMaxRowId),
+    );
+    return state;
+  }
+
+  const exists = await fs.pathExists(appPaths.stateFile);
+  if (!exists) {
+    const state: AppState = { lastProcessedMessageRowId: currentMaxRowId };
+    await writeState(state);
+    logger.info(
+      { currentMaxRowId },
+      "State file not found — initializing from current max ROWID",
+    );
+    logger.info(
+      { lastProcessedMessageRowId: currentMaxRowId },
+      "Watching for new messages after ROWID " + String(currentMaxRowId),
+    );
+    return state;
+  }
+
+  const saved = await readState();
+  logger.info(
+    { lastProcessedMessageRowId: saved.lastProcessedMessageRowId },
+    "Watching for new messages after ROWID " +
+      String(saved.lastProcessedMessageRowId),
+  );
+  return saved;
 }

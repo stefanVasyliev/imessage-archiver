@@ -16,16 +16,17 @@ import {
 // Schemas
 // ---------------------------------------------------------------------------
 
-const folderHintSchema = z.enum(["Photos", "Renders", "Final"]);
-const phaseSchema = z.enum(PROJECT_PHASES);
-
+// New canonical response shape from the model.
 const aiResponseSchema = z.object({
-  phase: phaseSchema,
-  folderHint: folderHintSchema,
-  description: z.string().min(1),
+  project: z.string().nullable(),
+  asset_type: z.enum(["Photos", "Videos", "Renders", "Final", "unknown"]),
+  phase: z.enum(PROJECT_PHASES).nullable(),
+  suggested_filename: z.string(),
   // Accept any number — AI sometimes returns a percentage (e.g. 90 instead of 0.9).
   // Normalized to 0..1 after parsing.
   confidence: z.number(),
+  action: z.enum(["auto_route", "manual_review"]),
+  reason: z.string(),
 });
 
 // ---------------------------------------------------------------------------
@@ -38,9 +39,21 @@ export type ClassificationSource =
   | "pdf-fallback"
   | "default-fallback";
 
-export type ClassificationResult = z.infer<typeof aiResponseSchema> & {
+export interface ClassificationResult {
+  // Existing fields kept for backward compatibility with finalNaming / routing.
+  readonly phase: (typeof PROJECT_PHASES)[number];
+  readonly folderHint: "Photos" | "Renders" | "Final";
+  readonly description: string;
+  readonly confidence: number;
   readonly classificationSource: ClassificationSource;
-};
+  // New fields from the redesigned prompt.
+  /** Full filename suggested by the model — e.g. "KR_02242026_Office_FramingProgress.jpg". */
+  readonly suggestedFilename?: string;
+  /** Model's routing verdict: auto_route = confident; manual_review = low confidence. */
+  readonly action: "auto_route" | "manual_review";
+  /** Model's own project opinion — may differ from resolveProject()'s result. */
+  readonly classifierProject?: string | null;
+}
 
 // ---------------------------------------------------------------------------
 // OpenAI client (lazy singleton)
@@ -157,6 +170,7 @@ function buildFallbackClassification(params: {
     description: buildFallbackDescription(params.category),
     confidence: 0.2,
     classificationSource: resolveFallbackSource(params.category),
+    action: "manual_review",
   };
 }
 
@@ -164,12 +178,44 @@ function buildFallbackClassification(params: {
 // Main classifier
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Helpers for mapping the new AI response back to legacy ClassificationResult
+// ---------------------------------------------------------------------------
+
+function assetTypeToFolderHint(
+  assetType: "Photos" | "Videos" | "Renders" | "Final" | "unknown",
+): "Photos" | "Renders" | "Final" {
+  if (assetType === "Renders") return "Renders";
+  if (assetType === "Final") return "Final";
+  return "Photos"; // Videos and Photos both land in Photos/Videos dirs (category decides)
+}
+
+/**
+ * Extract a description token from a suggested filename like
+ * "KR_02242026_ContentStudio_FramingProgress.jpg".
+ * Returns everything after the second underscore, minus the extension.
+ * Falls back to rawFallback when parsing fails.
+ */
+function descriptionFromSuggestedFilename(
+  suggested: string,
+  rawFallback: string,
+): string {
+  const base = suggested.replace(/\.[^.]+$/, ""); // strip extension
+  const parts = base.split("_");
+  // Format: Initials _ Date _ Location _ Description...
+  if (parts.length >= 4) return parts.slice(2).join("_"); // Location_Description
+  if (parts.length === 3) return parts[2] ?? rawFallback; // just Location
+  return rawFallback;
+}
+
 export async function classifyAttachment(params: {
   filePath: string;
   category: SupportedFileCategory;
   messageText?: string | null;
   originalFilename?: string | null;
   projectName?: string | null;
+  /** Known project folder names — included in the prompt so AI can name the file correctly. */
+  knownProjects?: string[];
   /**
    * Raw informal chat message that may carry phase/location hints.
    * Passed alongside messageText for richer AI context.
@@ -203,28 +249,83 @@ export async function classifyAttachment(params: {
   try {
     const openai = getClient();
 
+    const projectList = (params.knownProjects ?? []).length > 0
+      ? (params.knownProjects ?? []).map((p) => `  - ${p}`).join("\n")
+      : `  - ${params.projectName ?? "Unknown"}`;
+
     const userContent: UserContentItem[] = [
       {
         type: "input_text",
-        text:
-          `Project name is already known: ${params.projectName ?? "Unknown"}.\n` +
-          `Do not invent another project name.\n` +
-          `Return strict JSON only with keys: phase, folderHint, description, confidence.\n` +
-          `Allowed phase values: ${PROJECT_PHASES.join(", ")}.\n` +
-          `Allowed folderHint values: Photos, Renders, Final.\n` +
-          `Description must be short and suitable for file naming.\n` +
-          `Use PascalCase without punctuation, for example: FramingProgress, MaterialSamples, SiteWalkVideo.\n` +
-          `If uncertain, make your best guess.`,
-      },
-      {
-        type: "input_text",
-        text:
-          `File category: ${params.category}\n` +
-          `Original filename: ${params.originalFilename ?? "Unknown"}\n` +
-          `Message text: ${params.messageText ?? "None"}\n` +
+        text: [
+          `Project: ${params.projectName ?? "Unknown"}`,
+          `File category: ${params.category}`,
+          `Original filename: ${params.originalFilename ?? "Unknown"}`,
+          `Message text: ${params.messageText ?? "None"}`,
           `Recent chat context: ${params.chatHintText ?? "None"}`,
+        ].join("\n"),
       },
     ];
+
+    const senderInitials = (() => {
+      const fn = params.originalFilename ?? "";
+      const parts = fn.split("_");
+      const first = parts[0] ?? "";
+      return parts.length >= 2 && /^[A-Z]{2}$/.test(first) ? first : "XX";
+    })();
+
+    const todayStr = (() => {
+      const d = new Date();
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      const yy = String(d.getFullYear()).slice(-2);
+      return `${mm}${dd}${yy}`;
+    })();
+
+    const ext = path.extname(params.originalFilename ?? params.filePath).toLowerCase() || (params.category === "video" ? ".mp4" : ".jpg");
+
+    const systemPrompt = [
+      "You classify construction-site attachments for a file archiver.",
+      "Return valid JSON only. No markdown. No explanations.",
+      "",
+      "AVAILABLE PROJECT FOLDERS (choose EXACTLY one, verbatim casing):",
+      projectList,
+      "",
+      "FOLDER STRUCTURE:",
+      "  [Project]/Photos/[Phase]   — construction progress photos",
+      "  [Project]/Videos/[Phase]   — site walk videos",
+      "  [Project]/Renders          — 3D renders, concept visuals",
+      "  [Project]/Final            — portfolio / hero shots",
+      "",
+      "ALLOWED PHASES (for Photos and Videos only):",
+      "  Demo, Framing, Electrical, Finish",
+      "",
+      "FILE NAMING CONVENTION:",
+      "  [Initials]_[MMDDYY]_[Location]_[Description].[ext]",
+      "  Examples:",
+      "    KR_02242026_ContentStudio_FramingProgress.jpg",
+      "    ZN_02242026_Office_MaterialSamples.jpg",
+      "    DV_02242026_Greenhouse_SiteWalkVideo.mp4",
+      `  Use initials "${senderInitials}", date "${todayStr}", ext "${ext}".`,
+      "  Location = short place name (e.g. Office, Studio, Greenhouse).",
+      "  Description = short PascalCase label (e.g. FramingProgress, TileWork, SiteWalkVideo).",
+      "",
+      "PHASE DETECTION — use ALL available context (message, chat, image, filename):",
+      "  Demo       → demolition, tear-out, dumpster, gutted walls, bare concrete",
+      "  Framing    → studs, framing, lumber, rough walls, wood structure",
+      "  Electrical → wires, panels, outlets, switches, conduit, junction boxes",
+      "  Finish     → tile, paint, cabinets, flooring, fixtures, trim, final look",
+      "",
+      "RETURN strict JSON with exactly these keys:",
+      '  { "project": string, "asset_type": "Photos"|"Videos"|"Renders"|"Final"|"unknown",',
+      '    "phase": "Demo"|"Framing"|"Electrical"|"Finish"|null,',
+      '    "suggested_filename": string,',
+      '    "confidence": 0.0–1.0,',
+      '    "action": "auto_route"|"manual_review",',
+      '    "reason": string }',
+      "",
+      "Set action=manual_review when confidence < 0.6 or project is unclear.",
+      "ALWAYS return a phase for Photos/Videos. Use null for Renders/Final.",
+    ].join("\n");
 
     // Generate preview if not already provided by the caller.
     if (aiImagePath === null && params.category === "image") {
@@ -298,26 +399,6 @@ export async function classifyAttachment(params: {
       });
     }
 
-    const systemPrompt = [
-      "You classify construction-site attachments for a file archiver.",
-      "Return valid JSON only. No markdown. No explanations.",
-      "",
-      "Fields:",
-      "  phase      — construction phase. MUST be one of: Demo, Framing, Electrical, Finish.",
-      "  folderHint — MUST be one of: Photos, Renders, Final.",
-      "  description — short PascalCase label for the file name (e.g. FramingProgress, BathroomTile, SiteWalkVideo).",
-      "  confidence — decimal 0.0–1.0.",
-      "",
-      "Phase detection rules — use ALL available context (message, chat hint, image, filename):",
-      "  Demo       → demolition, tear-out, dumpster, gutted walls, bare concrete",
-      "  Framing    → studs, framing, lumber, rough walls, wood structure",
-      "  Electrical → wires, panels, outlets, switches, conduit, junction boxes",
-      "  Finish     → tile, paint, cabinets, flooring, fixtures, trim, final look",
-      "",
-      "ALWAYS return a phase — never omit it. If genuinely unclear, pick the best match from visual cues.",
-      "Use Finish as the last resort only if no other phase is visible.",
-    ].join("\n");
-
     const response = await openai.responses.create({
       model: env.OPENAI_MODEL ?? "gpt-4.1-mini",
       input: [
@@ -342,10 +423,26 @@ export async function classifyAttachment(params: {
     if (confidence > 1 && confidence <= 100) confidence = confidence / 100;
     confidence = Math.min(1, Math.max(0, confidence));
 
+    // Map new schema → ClassificationResult interface.
+    // folderHint and description are derived for backward-compat with routing/naming.
+    const folderHint = assetTypeToFolderHint(raw.asset_type);
+    const description = descriptionFromSuggestedFilename(
+      raw.suggested_filename,
+      buildFallbackDescription(params.category),
+    );
+    // Phase must always be a valid ProjectPhase for Photos/Videos; fall back to Finish.
+    const phase: ClassificationResult["phase"] =
+      raw.phase ?? detectPhaseFromText([params.messageText ?? "", params.originalFilename ?? ""].join(" "));
+
     const result: ClassificationResult = {
-      ...raw,
+      phase,
+      folderHint,
+      description,
       confidence,
       classificationSource: "ai",
+      suggestedFilename: raw.suggested_filename,
+      action: raw.action,
+      classifierProject: raw.project,
     };
 
     return result;

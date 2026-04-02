@@ -38,3 +38,14 @@ export function openChatDb(): Database.Database {
 
   return db;
 }
+
+/**
+ * Returns the current maximum message ROWID from chat.db.
+ * Used on startup to initialize the watermark so old rows are never re-processed.
+ */
+export function getCurrentMaxMessageRowId(db: Database.Database): number {
+  const row = db
+    .prepare("SELECT MAX(ROWID) AS maxRowId FROM message")
+    .get() as { maxRowId: number | null };
+  return row.maxRowId ?? 0;
+}
