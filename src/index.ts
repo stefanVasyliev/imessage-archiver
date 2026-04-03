@@ -312,10 +312,102 @@ function applyContextFromTextRow(
 }
 
 // ---------------------------------------------------------------------------
+// Attachment processing queue — concurrency = 1, in-memory
+// ---------------------------------------------------------------------------
+
+interface QueueItem {
+  row: RawAttachmentRow;
+  knownProjects: string[];
+}
+
+const attachmentQueue: QueueItem[] = [];
+const enqueuedIds = new Set<number>(); // keyed by attachmentRowId
+let queueRunning = false;
+let isPolling = false;
+
+function enqueueAttachment(row: RawAttachmentRow, knownProjects: string[]): void {
+  const id = row.attachmentRowId;
+  if (enqueuedIds.has(id)) {
+    logger.debug(
+      { attachmentRowId: id, messageRowId: row.messageRowId },
+      "Queue: already enqueued — skipping duplicate",
+    );
+    return;
+  }
+  enqueuedIds.add(id);
+  attachmentQueue.push({ row, knownProjects });
+  logger.info(
+    {
+      attachmentRowId: id,
+      messageRowId: row.messageRowId,
+      filename: row.attachmentFilename,
+      queueLength: attachmentQueue.length,
+    },
+    "Queue: enqueued",
+  );
+  void runQueueWorker();
+}
+
+async function runQueueWorker(): Promise<void> {
+  if (queueRunning) return;
+  queueRunning = true;
+  logger.info({ queueLength: attachmentQueue.length }, "Queue: worker started");
+  try {
+    while (attachmentQueue.length > 0) {
+      const item = attachmentQueue[0]!;
+      const { row, knownProjects } = item;
+      logger.info(
+        {
+          attachmentRowId: row.attachmentRowId,
+          messageRowId: row.messageRowId,
+          filename: row.attachmentFilename,
+          remaining: attachmentQueue.length,
+        },
+        "Queue: processing started",
+      );
+      const db = openChatDb();
+      try {
+        await processAttachment(row, knownProjects, db);
+        logger.info(
+          {
+            attachmentRowId: row.attachmentRowId,
+            messageRowId: row.messageRowId,
+            filename: row.attachmentFilename,
+          },
+          "Queue: processing finished",
+        );
+      } catch (err: unknown) {
+        logger.error(
+          {
+            error: err,
+            attachmentRowId: row.attachmentRowId,
+            messageRowId: row.messageRowId,
+            filename: row.attachmentFilename,
+          },
+          "Queue: processing failed — continuing with next",
+        );
+      } finally {
+        db.close();
+        attachmentQueue.shift();
+        enqueuedIds.delete(row.attachmentRowId);
+      }
+    }
+  } finally {
+    queueRunning = false;
+    logger.info("Queue: worker stopped");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main polling loop
 // ---------------------------------------------------------------------------
 
 async function processNewMessages(): Promise<void> {
+  if (isPolling) {
+    logger.info({}, "Poll cycle already in progress — skipping");
+    return;
+  }
+  isPolling = true;
   const db = openChatDb();
 
   try {
@@ -547,31 +639,21 @@ async function processNewMessages(): Promise<void> {
       rows.length === 0 ? "No new attachment rows found" : "New attachment rows fetched",
     );
 
-    let newestRowId = state.lastProcessedMessageRowId;
-
-    for (const row of rows) {
-      newestRowId = Math.max(newestRowId, row.messageRowId);
-
-      try {
-        await processAttachment(row, knownProjects, db);
-      } catch (error: unknown) {
-        logger.error(
-          {
-            error,
-            operation: "processAttachment",
-            messageRowId: row.messageRowId,
-            attachmentRowId: row.attachmentRowId,
-            chatId: row.chatId,
-            senderId: getSenderId(row),
-            attachmentFilename: row.attachmentFilename,
-          },
-          "Unexpected error processing attachment — skipping",
-        );
+    if (rows.length > 0) {
+      let newestRowId = state.lastProcessedMessageRowId;
+      for (const row of rows) {
+        newestRowId = Math.max(newestRowId, row.messageRowId);
+        enqueueAttachment(row, knownProjects);
       }
+      // Advance state after enqueuing so the next poll doesn't re-fetch these rows.
+      await writeState({ lastProcessedMessageRowId: newestRowId });
+      logger.info(
+        { newestRowId, enqueuedCount: rows.length, queueLength: attachmentQueue.length },
+        "State advanced — attachments queued for sequential processing",
+      );
     }
-
-    await writeState({ lastProcessedMessageRowId: newestRowId });
   } finally {
+    isPolling = false;
     db.close();
   }
 }
@@ -1148,6 +1230,16 @@ async function main(): Promise<void> {
 
   await ensureDirectories();
   scheduleWeeklyReport();
+
+  // Resolve the startup watermark before the first poll.
+  // - First run / no state file → set watermark to current DB max so old rows are skipped.
+  // - START_FROM_NOW=true       → always reset watermark to current DB max.
+  // - State file exists         → leave watermark as-is and log it.
+  const startupDb = openChatDb();
+  const currentMaxRowId = getCurrentMaxMessageRowId(startupDb);
+  startupDb.close();
+  await initializeStartupState(currentMaxRowId);
+
   await processNewMessages();
 
   setInterval(() => {

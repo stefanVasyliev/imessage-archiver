@@ -13,6 +13,40 @@ import {
 } from "./aiMediaPreview.js";
 
 // ---------------------------------------------------------------------------
+// Classification rules loader
+// ---------------------------------------------------------------------------
+
+const RULES_FILE_PATH = path.resolve(process.cwd(), "config", "classification-rules.md");
+
+const FALLBACK_RULES = [
+  "Real construction photos must never be classified as renders.",
+  "Ladders, tools, debris, people, or dust = real photo.",
+  "Wires alone do not mean Electrical phase unless electrical work is the main focus.",
+  "Cement board / Durock = TilePrep = Finish phase when dominant.",
+  "Always identify the dominant construction activity, not minor secondary details.",
+  "If unsure, prefer action=manual_review.",
+].join("\n");
+
+let cachedRules: string | null = null;
+
+async function loadClassificationRules(): Promise<string> {
+  try {
+    const content = await fs.readFile(RULES_FILE_PATH, "utf8");
+    if (!cachedRules) {
+      logger.info({ rulesFile: RULES_FILE_PATH }, "Classification rules loaded from file");
+    }
+    cachedRules = content.trim();
+    return cachedRules;
+  } catch {
+    logger.warn(
+      { rulesFile: RULES_FILE_PATH },
+      "Classification rules file not found — using built-in fallback rules",
+    );
+    return FALLBACK_RULES;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
 
@@ -242,6 +276,10 @@ export async function classifyAttachment(params: {
     return fallback;
   }
 
+  // Load classification rules from disk on every call so edits take effect
+  // without restarting the app.
+  const classificationRules = await loadClassificationRules();
+
   // Track the preview path and whether we own it (and therefore must clean it up).
   let aiImagePath: string | null = params.previewPath ?? null;
   const ownsPreview = params.previewPath === undefined;
@@ -287,6 +325,12 @@ export async function classifyAttachment(params: {
       "You classify construction-site attachments for a file archiver.",
       "Return valid JSON only. No markdown. No explanations.",
       "",
+      "═══════════════════════════════════════",
+      "CLASSIFICATION RULES (follow strictly):",
+      "═══════════════════════════════════════",
+      classificationRules,
+      "",
+      "═══════════════════════════════════════",
       "AVAILABLE PROJECT FOLDERS (choose EXACTLY one, verbatim casing):",
       projectList,
       "",
@@ -308,12 +352,6 @@ export async function classifyAttachment(params: {
       `  Use initials "${senderInitials}", date "${todayStr}", ext "${ext}".`,
       "  Location = short place name (e.g. Office, Studio, Greenhouse).",
       "  Description = short PascalCase label (e.g. FramingProgress, TileWork, SiteWalkVideo).",
-      "",
-      "PHASE DETECTION — use ALL available context (message, chat, image, filename):",
-      "  Demo       → demolition, tear-out, dumpster, gutted walls, bare concrete",
-      "  Framing    → studs, framing, lumber, rough walls, wood structure",
-      "  Electrical → wires, panels, outlets, switches, conduit, junction boxes",
-      "  Finish     → tile, paint, cabinets, flooring, fixtures, trim, final look",
       "",
       "RETURN strict JSON with exactly these keys:",
       '  { "project": string, "asset_type": "Photos"|"Videos"|"Renders"|"Final"|"unknown",',
