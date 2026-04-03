@@ -29,20 +29,22 @@ Do not guess aggressively.
 ## 1.1 Highest priority for project determination
 Use ONLY the last meaningful text message to determine the project.
 
-Meaningful text message examples:
-- `Poolhouse`
-- `Greenhouse`
-- `Clubhouse`
-- `Elysian`
+The list of available projects is supplied dynamically in the prompt under
+"AVAILABLE PROJECT FOLDERS". You must choose a project ONLY from that list.
+Do NOT invent project names. Do NOT use project names not in the list.
 
-If the last meaningful text message clearly matches a known project name, use that project.
+If the last meaningful text message clearly matches one of the project names
+in the AVAILABLE PROJECT FOLDERS list, use that project.
 
 ## 1.2 Do not override clear project text
-If the last meaningful text message clearly identifies the project, do NOT override it based only on the image.
+
+If the last meaningful text message clearly identifies the project, do NOT
+override it based only on the image.
 
 Example:
-- Last text message: `Poolhouse`
-- Incoming image: use project = `Poolhouse`
+
+- Last text message clearly names a project from the AVAILABLE PROJECT FOLDERS list
+- Use that project regardless of what the image shows
 
 ## 1.3 If no clear project is available
 If the last meaningful text message does not clearly identify a known project:

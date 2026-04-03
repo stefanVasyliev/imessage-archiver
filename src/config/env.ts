@@ -23,8 +23,8 @@ const envSchema = z.object({
   DASHBOARD_PORT: z.coerce.number().int().positive().default(3000),
   START_FROM_NOW: z
     .string()
-    .transform((v) => v === "true" || v === "1")
-    .default("false"),
+    .optional()
+    .transform((v) => v === "true" || v === "1"),
 });
 
 export const env = envSchema.parse(process.env);

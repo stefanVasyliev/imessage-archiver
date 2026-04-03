@@ -119,9 +119,7 @@ function buildFallbackDescription(category: SupportedFileCategory): string {
   return "ProgressPhoto";
 }
 
-function detectPhaseFromText(
-  input: string,
-): "Demo" | "Framing" | "Electrical" | "Finish" {
+function detectPhaseFromText(input: string): (typeof PROJECT_PHASES)[number] {
   const text = input.toLowerCase();
 
   if (
@@ -144,17 +142,47 @@ function detectPhaseFromText(
 
   if (
     text.includes("electrical") ||
-    text.includes("wire") ||
-    text.includes("wiring") ||
     text.includes("panel") ||
     text.includes("outlet") ||
-    text.includes("switch") ||
-    text.includes("light")
+    text.includes("switch")
   ) {
     return "Electrical";
   }
 
-  return "Finish";
+  if (text.includes("plumbing") || text.includes("drain") || text.includes("supply line")) {
+    return "Plumbing";
+  }
+
+  if (text.includes("hvac") || text.includes("duct") || text.includes("mechanical")) {
+    return "HVAC";
+  }
+
+  if (
+    text.includes("tile prep") ||
+    text.includes("tileprep") ||
+    text.includes("cement board") ||
+    text.includes("durock") ||
+    text.includes("backer board")
+  ) {
+    return "TilePrep";
+  }
+
+  if (
+    text.includes("tile") ||
+    text.includes("paint") ||
+    text.includes("cabinet") ||
+    text.includes("flooring") ||
+    text.includes("trim") ||
+    text.includes("fixture")
+  ) {
+    return "Finish";
+  }
+
+  if (text.includes("site") || text.includes("exterior") || text.includes("outside")) {
+    return "Site";
+  }
+
+  return "General";
 }
 
 function detectFolderHintFromText(
@@ -341,7 +369,7 @@ export async function classifyAttachment(params: {
       "  [Project]/Final            — portfolio / hero shots",
       "",
       "ALLOWED PHASES (for Photos and Videos only):",
-      "  Demo, Framing, Electrical, Finish",
+      "  Demo, Framing, Electrical, Plumbing, HVAC, TilePrep, Finish, Site, General",
       "",
       "FILE NAMING CONVENTION:",
       "  [Initials]_[MMDDYY]_[Location]_[Description].[ext]",
@@ -355,7 +383,7 @@ export async function classifyAttachment(params: {
       "",
       "RETURN strict JSON with exactly these keys:",
       '  { "project": string, "asset_type": "Photos"|"Videos"|"Renders"|"Final"|"unknown",',
-      '    "phase": "Demo"|"Framing"|"Electrical"|"Finish"|null,',
+      '    "phase": "Demo"|"Framing"|"Electrical"|"Plumbing"|"HVAC"|"TilePrep"|"Finish"|"Site"|"General"|null,',
       '    "suggested_filename": string,',
       '    "confidence": 0.0–1.0,',
       '    "action": "auto_route"|"manual_review",',

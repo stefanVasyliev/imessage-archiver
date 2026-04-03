@@ -165,7 +165,7 @@ export function buildFinalNaming(params: {
   originalPath: string;
   suggestedLocation?: string;
   suggestedDescription?: string;
-  suggestedPhase?: "Demo" | "Framing" | "Electrical" | "Finish";
+  suggestedPhase?: ProjectPhase;
 }): FinalNamingResult {
   const ext = path.extname(params.originalPath).toLowerCase();
 

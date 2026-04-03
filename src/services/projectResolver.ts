@@ -28,7 +28,7 @@ export interface ProjectResolution {
   /** Optional hints returned by AI — used downstream for naming/routing. */
   readonly suggestedLocation?: string;
   readonly suggestedDescription?: string;
-  readonly suggestedPhase?: "Demo" | "Framing" | "Electrical" | "Finish";
+  readonly suggestedPhase?: "Demo" | "Framing" | "Electrical" | "Plumbing" | "HVAC" | "TilePrep" | "Finish" | "Site" | "General";
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +194,7 @@ const aiProjectSchema = z.object({
   suggestedLocation: z.string().optional(),
   suggestedDescription: z.string().optional(),
   suggestedPhase: z
-    .enum(["Demo", "Framing", "Electrical", "Finish"])
+    .enum(["Demo", "Framing", "Electrical", "Plumbing", "HVAC", "TilePrep", "Finish", "Site", "General"])
     .nullable()
     .optional(),
 });
@@ -265,7 +265,7 @@ async function inferProjectViaAI(params: {
     "  6. Return confidence as a decimal 0.0–1.0.",
     "  7. If you cannot identify the project with ≥ 0.6 confidence, return null.",
     "",
-    'Return strict JSON: { "projectName": string | null, "confidence": number, "reasoning": string, "suggestedLocation"?: string, "suggestedDescription"?: string, "suggestedPhase"?: "Demo" | "Framing" | "Electrical" | "Finish" | null }',
+    'Return strict JSON: { "projectName": string | null, "confidence": number, "reasoning": string, "suggestedLocation"?: string, "suggestedDescription"?: string, "suggestedPhase"?: "Demo" | "Framing" | "Electrical" | "Plumbing" | "HVAC" | "TilePrep" | "Finish" | "Site" | "General" | null }',
   ].join("\n");
 
   const contextLines: string[] = [];

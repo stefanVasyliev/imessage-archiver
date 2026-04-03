@@ -125,14 +125,12 @@ function buildRenderClassification(): ClassificationResult {
 }
 
 // ---------------------------------------------------------------------------
-// Target directory resolution — strict folder existence checks.
+// Target directory resolution — auto-creates valid subfolders.
 //
 // Rules:
 //   • Unknown project (MANUAL_REVIEW_PROJECT) → global ManualReview/
-//   • Project folder missing on disk → global ManualReview/
-//   • rootFolder (Photos/Videos/Renders/Final) missing → [Project]/Manual Review/
-//   • phase missing (Photos/Videos) → [Project]/Manual Review/
-//   • phase folder missing on disk → [Project]/Manual Review/
+//   • Project folder missing on disk          → global ManualReview/ (never invented)
+//   • rootFolder or phase folder missing      → auto-create it (project already exists)
 // ---------------------------------------------------------------------------
 
 const VIDEO_CONFIDENCE_THRESHOLD = 0.4;
@@ -157,13 +155,9 @@ async function resolveTargetDirectory(params: {
     };
   }
 
-  // Use projectName as-is — it comes from getKnownProjects() which reads actual
-  // folder names from disk.  normalizeProjectName() would corrupt names like
-  // "Office_OrangeCounty_ModernRed" → "OfficeOrangeCountyModernRed", causing a
-  // false path-not-found and a silent fallback to ManualReview.
   const projectRoot = path.join(appPaths.root, projectName);
 
-  // Project folder must exist — never auto-create.
+  // Project folder must already exist — never auto-create project roots.
   if (!(await fs.pathExists(projectRoot))) {
     logger.warn(
       { projectName, projectRoot },
@@ -180,18 +174,15 @@ async function resolveTargetDirectory(params: {
     "[routing] Project root exists on disk",
   );
 
-  const projectManualReview = path.join(projectRoot, "Manual Review");
-
-  // Renders / Final: no phase subfolder needed.
+  // Renders / Final: no phase subfolder needed — auto-create if missing.
   if (rootFolder === "Renders" || rootFolder === "Final") {
     const targetDir = path.join(projectRoot, rootFolder);
     if (!(await fs.pathExists(targetDir))) {
-      logger.warn(
+      logger.info(
         { targetDir },
-        "[routing] Root folder not found on disk — routing to project Manual Review",
+        "[routing] Root folder missing — auto-creating",
       );
-      await fs.ensureDir(projectManualReview);
-      return { dir: projectManualReview, routingMode: "project-manual-review" };
+      await fs.ensureDir(targetDir);
     }
     logger.info(
       { operation: "resolveTargetDirectory", projectName, rootFolder, targetDir, routingMode: "project" },
@@ -200,39 +191,38 @@ async function resolveTargetDirectory(params: {
     return { dir: targetDir, routingMode: "project" };
   }
 
-  // Photos / Videos: rootFolder must exist.
+  // Photos / Videos: auto-create rootFolder if missing.
   const rootDir = path.join(projectRoot, rootFolder);
   if (!(await fs.pathExists(rootDir))) {
-    logger.warn(
+    logger.info(
       { rootDir },
-      "[routing] Root folder not found on disk — routing to project Manual Review",
+      "[routing] Root folder missing — auto-creating",
     );
-    await fs.ensureDir(projectManualReview);
-    return { dir: projectManualReview, routingMode: "project-manual-review" };
+    await fs.ensureDir(rootDir);
   }
 
   logger.info(
     { operation: "resolveTargetDirectory", projectName, rootFolder, rootDir },
-    "[routing] Root folder (Photos/Videos) exists on disk",
+    "[routing] Root folder (Photos/Videos) resolved",
   );
 
-  // Phase unknown — fall back to root folder (Photos/ or Videos/).
+  // No phase — route to rootFolder.
   if (phaseFolder === undefined) {
     logger.info(
       { projectName, rootFolder, rootDir, routingMode: "project" },
-      "[routing] Phase unknown — falling back to root folder",
+      "[routing] Phase unknown — routing to root folder",
     );
     return { dir: rootDir, routingMode: "project" };
   }
 
-  // Phase folder must exist — if not, fall back to root folder.
+  // Phase folder — auto-create if missing.
   const phaseDir = path.join(rootDir, phaseFolder);
   if (!(await fs.pathExists(phaseDir))) {
-    logger.warn(
-      { phaseDir, rootDir, routingMode: "project" },
-      "[routing] Phase folder not found on disk — falling back to root folder",
+    logger.info(
+      { phaseDir },
+      "[routing] Phase folder missing — auto-creating",
     );
-    return { dir: rootDir, routingMode: "project" };
+    await fs.ensureDir(phaseDir);
   }
   logger.info(
     { operation: "resolveTargetDirectory", projectName, rootFolder, phaseFolder, phaseDir, routingMode: "project" },
