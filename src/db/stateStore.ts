@@ -101,6 +101,23 @@ export async function initializeStartupState(
   }
 
   const saved = await readState();
+
+  // Guard: a persisted 0 would reprocess ALL historical messages.
+  // Treat it the same as a missing state file — reset to current max.
+  if (saved.lastProcessedMessageRowId === 0) {
+    const state: AppState = { lastProcessedMessageRowId: currentMaxRowId };
+    await writeState(state);
+    logger.warn(
+      { savedRowId: 0, currentMaxRowId },
+      "State file had lastProcessedMessageRowId=0 — resetting to current max ROWID to prevent historical reprocessing",
+    );
+    logger.info(
+      { lastProcessedMessageRowId: currentMaxRowId },
+      "Watching for new messages after ROWID " + String(currentMaxRowId),
+    );
+    return state;
+  }
+
   logger.info(
     { lastProcessedMessageRowId: saved.lastProcessedMessageRowId },
     "Watching for new messages after ROWID " +

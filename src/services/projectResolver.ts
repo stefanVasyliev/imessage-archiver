@@ -1,4 +1,5 @@
 import * as fsNode from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import * as path from "node:path";
 import OpenAI from "openai";
 import { z } from "zod";
@@ -43,10 +44,39 @@ const AI_CONFIDENCE_THRESHOLD = 0.6;
 /** Top-level directories that are infrastructure, not projects. */
 const EXCLUDED_DIRS = new Set([
   "duplicates",
+  "Duplicates",
   "logs",
+  "Logs",
   "reports",
+  "Reports",
+  "tmp",
+  ".tmp",
   MANUAL_REVIEW_PROJECT,
 ]);
+
+// ---------------------------------------------------------------------------
+// Alias normalization
+//
+// Maps common typos / informal project references → canonical folder names.
+// Keys must be lowercase, letters only (same normalization applied to input).
+// ---------------------------------------------------------------------------
+
+const PROJECT_ALIASES: Record<string, string> = {
+  pollhouse: "Poolhouse",
+  polhouse: "Poolhouse",
+  poolhose: "Poolhouse",
+};
+
+/**
+ * Normalizes `text` to lowercase letters only, then checks the alias map.
+ * Returns the canonical project name if it exists in `knownProjects`, else null.
+ */
+function lookupAlias(text: string, knownProjects: string[]): string | null {
+  const key = text.trim().toLowerCase().replace(/[^a-z]/g, "");
+  const alias = PROJECT_ALIASES[key];
+  if (alias !== undefined && knownProjects.includes(alias)) return alias;
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Tag parsing
@@ -77,29 +107,55 @@ export function parseProjectTag(text: string): string | null {
 // ---------------------------------------------------------------------------
 
 export async function getKnownProjects(): Promise<string[]> {
+  logger.info(
+    { operation: "getKnownProjects", storageRoot: appPaths.root },
+    "Scanning storage root for project folders",
+  );
+
+  let entries: Dirent[];
   try {
-    const entries = await fsNode.readdir(appPaths.root, {
-      withFileTypes: true,
-    });
-    return entries
-      .filter(
-        (e) =>
-          e.isDirectory() &&
-          !e.name.startsWith(".") &&
-          !EXCLUDED_DIRS.has(e.name),
-      )
-      .map((e) => e.name);
+    entries = await fsNode.readdir(appPaths.root, { withFileTypes: true });
   } catch (err: unknown) {
     logger.error(
-      {
-        error: err,
-        operation: "getKnownProjects",
-        rootPath: appPaths.root,
-      },
-      "Failed to read known projects directory — all attachments will route to ManualReview",
+      { error: err, operation: "getKnownProjects", storageRoot: appPaths.root },
+      "CRITICAL: Cannot read storage root — check APP_STORAGE_ROOT; all attachments will route to ManualReview",
     );
     return [];
   }
+
+  const allNames = entries.map((e) => e.name);
+  const projects = entries
+    .filter(
+      (e) =>
+        e.isDirectory() &&
+        !e.name.startsWith(".") &&
+        !EXCLUDED_DIRS.has(e.name),
+    )
+    .map((e) => e.name);
+
+  if (projects.length === 0) {
+    logger.warn(
+      {
+        operation: "getKnownProjects",
+        storageRoot: appPaths.root,
+        allEntries: allNames,
+        excludedDirs: [...EXCLUDED_DIRS],
+      },
+      "No project folders found in storage root — all attachments will route to ManualReview",
+    );
+  } else {
+    logger.info(
+      {
+        operation: "getKnownProjects",
+        storageRoot: appPaths.root,
+        count: projects.length,
+        projects,
+      },
+      "Project folders scanned successfully",
+    );
+  }
+
+  return projects;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +195,16 @@ export function findMatchingProject(
   text: string,
   knownProjects: string[],
 ): string | null {
+  // 0. Direct alias lookup — handles typos like "Pollhouse" → "Poolhouse".
+  const aliasMatch = lookupAlias(text, knownProjects);
+  if (aliasMatch !== null) {
+    logger.info(
+      { input: text, resolved: aliasMatch },
+      "[project-match] Alias normalization matched project",
+    );
+    return aliasMatch;
+  }
+
   const normalizedText = normalize(text);
   const sorted = [...knownProjects].sort((a, b) => b.length - a.length);
 

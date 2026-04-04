@@ -314,6 +314,8 @@ const attachmentQueue: QueueItem[] = [];
 const enqueuedIds = new Set<number>(); // keyed by attachmentRowId
 let queueRunning = false;
 let isPolling = false;
+// History seeding from recent text messages runs exactly once at startup.
+let historySeeded = false;
 
 function enqueueAttachment(row: RawAttachmentRow, knownProjects: string[]): void {
   const id = row.attachmentRowId;
@@ -413,49 +415,41 @@ async function processNewMessages(): Promise<void> {
       "Known projects loaded",
     );
 
-    // ---- Context seeding pass (history-scan) ----
-    // Read the 30 most recent text messages regardless of the state pointer so
-    // that project-defining messages sent before the last processed attachment
-    // ROWID are still captured (e.g. after restart or pointer advancement).
-    // recentRows is newest-first; we walk it to find the most recent useful message.
-    let recentRows: TextMessageRow[];
-    try {
-      recentRows = getRecentTextMessages(db, 30);
-    } catch (err: unknown) {
-      logger.error(
-        { error: err, operation: "getRecentTextMessages" },
-        "Failed to query recent text messages for context seeding — continuing with empty context",
+    // ---- Context seeding pass (history-scan) — runs ONCE at startup only ----
+    if (!historySeeded) {
+      historySeeded = true;
+      let recentRows: TextMessageRow[];
+      try {
+        recentRows = getRecentTextMessages(db, 30);
+      } catch (err: unknown) {
+        logger.error(
+          { error: err, operation: "getRecentTextMessages" },
+          "Failed to query recent text messages for context seeding — continuing with empty context",
+        );
+        recentRows = [];
+      }
+
+      logger.info(
+        {
+          operation: "getRecentTextMessages",
+          count: recentRows.length,
+          rowIdRange:
+            recentRows.length > 0
+              ? {
+                  newest: recentRows.at(0)?.messageRowId ?? null,
+                  oldest: recentRows.at(-1)?.messageRowId ?? null,
+                }
+              : null,
+          senderIds: [...new Set(recentRows.map((r) => r.handleId ?? "me"))],
+          texts: recentRows.slice(0, 5).map((r) => r.text?.slice(0, 60) ?? null),
+        },
+        recentRows.length === 0
+          ? "No recent text rows found for context seeding"
+          : "Recent text rows fetched for context seeding (startup only)",
       );
-      recentRows = [];
-    }
 
-    logger.info(
-      {
-        operation: "getRecentTextMessages",
-        count: recentRows.length,
-        rowIdRange:
-          recentRows.length > 0
-            ? {
-                newest: recentRows.at(0)?.messageRowId ?? null,
-                oldest: recentRows.at(-1)?.messageRowId ?? null,
-              }
-            : null,
-        senderIds: [...new Set(recentRows.map((r) => r.handleId ?? "me"))],
-        texts: recentRows.slice(0, 5).map((r) => r.text?.slice(0, 60) ?? null),
-      },
-      recentRows.length === 0
-        ? "No recent text rows found for context seeding"
-        : "Recent text rows fetched for context seeding",
-    );
-
-    {
-      // Collect up to 5 recent non-matching messages as raw hints.
-      // recentRows is newest-first; we reverse before storing so the context
-      // store accumulates them oldest-first (the correct order for AI context).
       const hintRows: TextMessageRow[] = [];
       let resolvedFromHistory = false;
-      // Track which senders we have already seeded so we store only the most
-      // recent message per sender (first occurrence in newest-first iteration).
       const seededSenders = new Set<string>();
 
       for (const row of recentRows) {
@@ -464,8 +458,6 @@ async function processNewMessages(): Promise<void> {
         const sentAtMs =
           appleMessageDateToDate(row.messageDate)?.getTime() ?? Date.now();
 
-        // Seed the most recent text for this sender (skip older messages for the
-        // same sender — they will be overwritten if applyContextFromTextRow fires).
         if (!seededSenders.has(senderId)) {
           contextStore.setSender(senderId, row.text, { sentAtMs });
           seededSenders.add(senderId);
@@ -473,8 +465,6 @@ async function processNewMessages(): Promise<void> {
 
         const projectName = matchProjectFromText(row.text, knownProjects);
         if (projectName !== null) {
-          // applyContextFromTextRow upgrades the sender entry with a resolved
-          // projectName and correct sentAtMs — overwriting the seed above.
           applyContextFromTextRow(row, projectName, "recent-history-scan");
           resolvedFromHistory = true;
           break;
@@ -484,8 +474,6 @@ async function processNewMessages(): Promise<void> {
         }
       }
 
-      // Only store raw hints when no resolved project was found.
-      // Store oldest-first so setChatHint accumulates them in chronological order.
       if (!resolvedFromHistory) {
         for (const row of [...hintRows].reverse()) {
           if (!row.text) continue;

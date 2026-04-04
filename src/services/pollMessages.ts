@@ -362,15 +362,29 @@ export function getLastMeaningfulTextMessageBySenderBefore(
             params.handleId ?? "",
           ) as CandidateRow[]);
 
+  // Two-pass: prefer the most recent short text (≤ 60 chars, ≥ 4 chars) as
+  // it is most likely a project name/marker rather than conversational text.
+  // Fall back to the most recent meaningful text of any length.
+  let longFallback: string | null = null;
+
   for (const row of rows) {
-    if (typeof row.text === "string" && isMeaningfulHumanText(row.text)) {
-      return row.text.trim();
+    const text =
+      typeof row.text === "string" && isMeaningfulHumanText(row.text)
+        ? row.text.trim()
+        : extractTextFromAttributedBody(row.attributedBody);
+
+    if (text === null) continue;
+
+    if (text.length >= 4 && text.length <= 60) {
+      return text;
     }
-    const fromBody = extractTextFromAttributedBody(row.attributedBody);
-    if (fromBody !== null) return fromBody;
+
+    if (longFallback === null) {
+      longFallback = text;
+    }
   }
 
-  return null;
+  return longFallback;
 }
 
 /**
