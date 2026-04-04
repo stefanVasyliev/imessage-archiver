@@ -6,12 +6,7 @@ export const PROJECT_PHASES = [
   "Demo",
   "Framing",
   "Electrical",
-  "Plumbing",
-  "HVAC",
-  "TilePrep",
   "Finish",
-  "Site",
-  "General",
 ] as const;
 
 export type ProjectPhase = (typeof PROJECT_PHASES)[number];

@@ -255,22 +255,18 @@ The dominant room condition matters more than small incidental objects.
 
 # 7. PHASE RULES
 
-Allowed `phase` values:
+Allowed `phase` values — EXACTLY these four, nothing else:
+
 - `Demo`
 - `Framing`
 - `Electrical`
-- `Plumbing`
-- `HVAC`
-- `TilePrep`
 - `Finish`
-- `Site`
-- `General`
 - `null`
 
-Use `null` only for:
-- `Renders`
-- `Final`
-- cases where no phase is appropriate
+Use `null` ONLY for `Renders` and `Final`.
+Always return one of the four phases for `Photos` and `Videos`.
+
+Do NOT return any other phase value (no Plumbing, HVAC, TilePrep, Site, General, etc.).
 
 ---
 
@@ -299,9 +295,12 @@ Use `Framing` when the image is mainly about:
 - exposed framing layout
 - structural rough construction
 - partially framed walls/ceilings
-- framing phase as the dominant condition
+- rough plumbing pipes or drains as main subject
+- HVAC duct rough-in as main subject
+- cement board / backer board as dominant wall surface (tile prep stage)
+- any early rough-construction condition not yet at finish stage
 
-Do not use `Framing` if framing is only a small background detail and the dominant condition is later-stage prep or finish.
+When in doubt between `Framing` and `Finish`, use `Framing` if the room looks unfinished.
 
 ---
 
@@ -320,86 +319,28 @@ Strong indicators:
 Hard rules:
 - Wires alone do NOT mean Electrical
 - A hanging wire by itself is not enough
-- If the room is mostly tile prep, framing, or finish, classify by that dominant stage instead
+- If the room is mostly framing, tile prep, or finish work, classify by that dominant stage
 
 Example:
-- Cement board room with one hanging wire -> NOT Electrical
-- A wall full of visible rough wiring and boxes -> Electrical
+- Cement board room with one hanging wire → `Framing` (not Electrical)
+- A wall full of visible rough wiring and boxes → `Electrical`
 
 ---
 
-# 11. PLUMBING RULES
+# 11. FINISH RULES
 
-Use `Plumbing` only when plumbing work is the dominant subject.
-
-Strong indicators:
-- drain lines
-- supply lines
-- exposed plumbing layout
-- valve/manifold work
-- clear rough plumbing documentation
-
-Hard rules:
-- One visible pipe does NOT automatically mean Plumbing
-- If plumbing is secondary, do not classify as Plumbing
-
----
-
-# 12. HVAC RULES
-
-Use `HVAC` only when HVAC work is the dominant subject.
-
-Indicators:
-- ducts
-- vent routing
-- mechanical equipment
-- HVAC rough-in
-- visible HVAC installation as primary subject
-
-Do not use `HVAC` if only a small vent or small duct piece is visible incidentally.
-
----
-
-# 13. TILE PREP RULES
-
-Use `TilePrep` when the image mainly shows preparation for tile installation.
-
-Strong indicators:
-- cement board
-- Durock
-- backer board
-- tile substrate prep
-- shower walls ready for tile
-- bathroom or wet-area prep surfaces
-- waterproofing prep
-- surfaces intentionally prepared before tile installation
-
-Hard rules:
-- Cement board / Durock usually means `TilePrep` when it is the dominant installed surface
-- If walls are mainly covered with Durock/cement board, use `TilePrep`
-- Do not misclassify Durock walls as Electrical just because wires are visible
-
-Example:
-- Full room lined with Durock and unfinished prep surfaces -> TilePrep
-
----
-
-# 14. FINISH RULES
-
-Use `Finish` when the image mainly shows:
-- painting
+Use `Finish` when the image mainly shows late-stage or completed work:
 - completed tile
+- paint
 - trim
 - cabinetry install
 - installed fixtures
-- near-final finish surfaces
+- near-final or finished surfaces
 - finish carpentry
 - polished late-stage work
 
-Use `Finish` only when the room is clearly beyond rough construction and prep.
-
 Do not use `Finish` for:
-- framing
+- raw framing
 - rough wiring
 - cement board prep
 - demolition
@@ -407,24 +348,7 @@ Do not use `Finish` for:
 
 ---
 
-# 15. SITE / GENERAL RULES
-
-Use `Site` when the image mainly shows:
-- outside jobsite
-- exterior setup
-- general site walk
-- broad progress view
-- not tied clearly to one detailed interior phase
-
-Use `General` when:
-- a real construction photo exists
-- but a more specific phase is not clear enough
-
-Prefer `General` over a bad specific guess.
-
----
-
-# 16. PHASE PRIORITY RULES
+# 12. PHASE PRIORITY RULES
 
 When multiple possible phases appear in one image, choose the dominant one.
 
@@ -435,10 +359,10 @@ Priority logic:
 4. Prefer broader but correct phase over narrow but wrong phase
 
 Examples:
-- Durock room with one wire -> TilePrep
-- Framed opening with one hanging cable -> Framing
-- Real clean finished bathroom with completed tile -> Finish
-- Dusty active site photo with ladders and rough materials -> Photos + likely Framing/General, not Render, not Final
+- Cement board / Durock room with one wire → `Framing`
+- Framed opening with one hanging cable → `Framing`
+- Real clean finished bathroom with completed tile → `Finish`
+- Dusty active site photo with rough framing → `Framing` (not Final, not Render)
 
 ---
 
@@ -504,9 +428,10 @@ Bad examples:
 # 20. UNKNOWN / MANUAL REVIEW RULES
 
 If uncertain:
+
 - use `project = "unknown"` if project is unclear
 - use `asset_type = "unknown"` if type is unclear
-- use `phase = "General"` or `null` if needed
+- use `phase = "Finish"` as the safe default if phase is unclear (never return a non-allowed value)
 - use `action = "manual_review"`
 
 Do not force a wrong answer just to sound confident.
@@ -517,13 +442,14 @@ Do not force a wrong answer just to sound confident.
 
 These corrections are especially important and must be treated as high-priority memory:
 
-- Cement board / Durock as dominant wall surface -> `TilePrep`
-- Real construction photos -> NEVER `Renders`
+- Cement board / Durock as dominant wall surface → `Framing` (tile-prep is part of rough stage)
+- Real construction photos → NEVER `Renders`
 - Wires alone do not mean `Electrical`
 - A visible person means the image is a real photo
-- Ladders, tools, debris, raw site conditions -> real `Photos`
+- Ladders, tools, debris, raw site conditions → real `Photos`
 - Dominant activity matters more than secondary objects
-- Finished polished portfolio-ready image only -> `Final`
+- Finished polished portfolio-ready image only → `Final`
+- If the scene is an exterior site walk or general broad view → use `Framing` as default phase
 
 ---
 
@@ -537,7 +463,7 @@ Use this exact structure:
 {
   "project": "string",
   "asset_type": "Photos | Videos | Renders | Final | unknown",
-  "phase": "Demo | Framing | Electrical | Plumbing | HVAC | TilePrep | Finish | Site | General | null",
+  "phase": "Demo | Framing | Electrical | Finish | null",
   "confidence": 0.0,
   "action": "auto_route | manual_review",
   "reason": "short explanation"

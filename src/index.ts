@@ -500,24 +500,17 @@ async function processNewMessages(): Promise<void> {
       textRows = [];
     }
 
-    logger.info(
-      {
-        operation: "getNewTextMessages",
-        lastProcessedMessageRowId: state.lastProcessedMessageRowId,
-        chatId: env.TARGET_CHAT_ID,
-        count: textRows.length,
-        rowIdRange:
-          textRows.length > 0
-            ? {
-                min: textRows.at(0)?.messageRowId ?? null,
-                max: textRows.at(-1)?.messageRowId ?? null,
-              }
-            : null,
-        senderIds: [...new Set(textRows.map((r) => r.handleId ?? "me"))],
-        texts: textRows.map((r) => ({ rowId: r.messageRowId, text: r.text?.slice(0, 80) ?? null })),
-      },
-      textRows.length === 0 ? "No new text messages found" : "New text messages fetched",
-    );
+    if (textRows.length > 0) {
+      logger.info(
+        {
+          operation: "getNewTextMessages",
+          lastProcessedMessageRowId: state.lastProcessedMessageRowId,
+          count: textRows.length,
+          texts: textRows.map((r) => ({ rowId: r.messageRowId, text: r.text?.slice(0, 80) ?? null })),
+        },
+        "New text messages fetched",
+      );
+    }
 
     for (const textRow of textRows) {
       if (!textRow.text) continue;
@@ -591,31 +584,32 @@ async function processNewMessages(): Promise<void> {
       return;
     }
 
-    logger.info(
-      {
-        operation: "getNewAttachmentRows",
-        lastProcessedMessageRowId: state.lastProcessedMessageRowId,
-        chatId: env.TARGET_CHAT_ID,
-        count: rows.length,
-        rowIdRange:
-          rows.length > 0
-            ? {
-                min: rows.at(0)?.messageRowId ?? null,
-                max: rows.at(-1)?.messageRowId ?? null,
-              }
-            : null,
-        attachments: rows.map((r) => ({
-          messageRowId: r.messageRowId,
-          attachmentRowId: r.attachmentRowId,
-          handleId: r.handleId,
-          isFromMe: r.isFromMe,
-          filename: r.attachmentFilename,
-          mimeType: r.attachmentMimeType,
-          chatDisplayName: r.chatDisplayName,
-        })),
-      },
-      rows.length === 0 ? "No new attachment rows found" : "New attachment rows fetched",
-    );
+    if (rows.length === 0) {
+      logger.debug(
+        { lastProcessedMessageRowId: state.lastProcessedMessageRowId },
+        "Poll: no new rows",
+      );
+    } else {
+      logger.info(
+        {
+          operation: "getNewAttachmentRows",
+          lastProcessedMessageRowId: state.lastProcessedMessageRowId,
+          chatId: env.TARGET_CHAT_ID,
+          count: rows.length,
+          rowIdRange: {
+            min: rows.at(0)?.messageRowId ?? null,
+            max: rows.at(-1)?.messageRowId ?? null,
+          },
+          attachments: rows.map((r) => ({
+            messageRowId: r.messageRowId,
+            attachmentRowId: r.attachmentRowId,
+            filename: r.attachmentFilename,
+            mimeType: r.attachmentMimeType,
+          })),
+        },
+        "New attachment rows fetched",
+      );
+    }
 
     if (rows.length > 0) {
       let newestRowId = state.lastProcessedMessageRowId;

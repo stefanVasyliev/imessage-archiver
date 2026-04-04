@@ -22,7 +22,7 @@ const FALLBACK_RULES = [
   "Real construction photos must never be classified as renders.",
   "Ladders, tools, debris, people, or dust = real photo.",
   "Wires alone do not mean Electrical phase unless electrical work is the main focus.",
-  "Cement board / Durock = TilePrep = Finish phase when dominant.",
+  "Cement board, backer board, tile prep work = Finish phase when dominant.",
   "Always identify the dominant construction activity, not minor secondary details.",
   "If unsure, prefer action=manual_review.",
 ].join("\n");
@@ -149,26 +149,25 @@ function detectPhaseFromText(input: string): (typeof PROJECT_PHASES)[number] {
     return "Electrical";
   }
 
-  if (text.includes("plumbing") || text.includes("drain") || text.includes("supply line")) {
-    return "Plumbing";
-  }
-
-  if (text.includes("hvac") || text.includes("duct") || text.includes("mechanical")) {
-    return "HVAC";
-  }
-
+  // All other specific phases normalize to their nearest allowed value.
+  // Plumbing/HVAC/framing-stage work → Framing (rough-in stage)
   if (
-    text.includes("tile prep") ||
-    text.includes("tileprep") ||
-    text.includes("cement board") ||
-    text.includes("durock") ||
-    text.includes("backer board")
+    text.includes("plumbing") ||
+    text.includes("drain") ||
+    text.includes("supply line") ||
+    text.includes("hvac") ||
+    text.includes("duct") ||
+    text.includes("mechanical")
   ) {
-    return "TilePrep";
+    return "Framing";
   }
 
+  // Tile prep, cement board, backer board → Finish (prep is part of finish stage)
   if (
     text.includes("tile") ||
+    text.includes("cement board") ||
+    text.includes("durock") ||
+    text.includes("backer board") ||
     text.includes("paint") ||
     text.includes("cabinet") ||
     text.includes("flooring") ||
@@ -178,11 +177,7 @@ function detectPhaseFromText(input: string): (typeof PROJECT_PHASES)[number] {
     return "Finish";
   }
 
-  if (text.includes("site") || text.includes("exterior") || text.includes("outside")) {
-    return "Site";
-  }
-
-  return "General";
+  return "Finish";
 }
 
 function detectFolderHintFromText(
@@ -369,7 +364,7 @@ export async function classifyAttachment(params: {
       "  [Project]/Final            — portfolio / hero shots",
       "",
       "ALLOWED PHASES (for Photos and Videos only):",
-      "  Demo, Framing, Electrical, Plumbing, HVAC, TilePrep, Finish, Site, General",
+      "  Demo, Framing, Electrical, Finish",
       "",
       "FILE NAMING CONVENTION:",
       "  [Initials]_[MMDDYY]_[Location]_[Description].[ext]",
@@ -383,7 +378,7 @@ export async function classifyAttachment(params: {
       "",
       "RETURN strict JSON with exactly these keys:",
       '  { "project": string, "asset_type": "Photos"|"Videos"|"Renders"|"Final"|"unknown",',
-      '    "phase": "Demo"|"Framing"|"Electrical"|"Plumbing"|"HVAC"|"TilePrep"|"Finish"|"Site"|"General"|null,',
+      '    "phase": "Demo"|"Framing"|"Electrical"|"Finish"|null,',
       '    "suggested_filename": string,',
       '    "confidence": 0.0–1.0,',
       '    "action": "auto_route"|"manual_review",',
@@ -481,7 +476,26 @@ export async function classifyAttachment(params: {
 
     const rawText = response.output_text;
 
-    const parsed: unknown = JSON.parse(rawText);
+    const parsedRaw = JSON.parse(rawText) as Record<string, unknown>;
+
+    // Normalize legacy/extended phase values the model might still return into
+    // the four canonical phases before Zod validation.
+    const PHASE_NORMALIZATION: Record<string, string> = {
+      TilePrep: "Finish",
+      Plumbing: "Framing",
+      HVAC: "Framing",
+      Site: "Framing",
+      General: "Finish",
+    };
+    if (typeof parsedRaw.phase === "string" && parsedRaw.phase in PHASE_NORMALIZATION) {
+      logger.info(
+        { originalPhase: parsedRaw.phase, normalizedPhase: PHASE_NORMALIZATION[parsedRaw.phase] },
+        "AI returned non-canonical phase — normalizing",
+      );
+      parsedRaw.phase = PHASE_NORMALIZATION[parsedRaw.phase];
+    }
+
+    const parsed: unknown = parsedRaw;
     const raw = aiResponseSchema.parse(parsed);
 
     // Normalize confidence: AI sometimes returns a percentage (90 → 0.9).
