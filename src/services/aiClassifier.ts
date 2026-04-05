@@ -3,7 +3,8 @@ import * as path from "node:path";
 import OpenAI from "openai";
 import { z } from "zod";
 import { env } from "../config/env.js";
-import { PROJECT_PHASES } from "../utils/projectFolders.js";
+import { PROJECT_TRADES } from "../utils/projectFolders.js";
+import type { ProjectTrade } from "../utils/projectFolders.js";
 import type { SupportedFileCategory } from "../utils/fileType.js";
 import { logger } from "../utils/logger.js";
 import {
@@ -50,17 +51,17 @@ async function loadClassificationRules(): Promise<string> {
 // Schemas
 // ---------------------------------------------------------------------------
 
-// New canonical response shape from the model.
+// Canonical response shape from the model.
 const aiResponseSchema = z.object({
   project: z.string().nullable(),
-  asset_type: z.enum(["Photos", "Videos", "Renders", "Final", "unknown"]),
-  phase: z.enum(PROJECT_PHASES).nullable(),
-  suggested_filename: z.string(),
+  asset_type: z.enum(["Photos", "Videos", "Renders", "Final"]),
+  trade: z.enum(PROJECT_TRADES).nullable(),
   // Accept any number — AI sometimes returns a percentage (e.g. 90 instead of 0.9).
   // Normalized to 0..1 after parsing.
   confidence: z.number(),
   action: z.enum(["auto_route", "manual_review"]),
   reason: z.string(),
+  target_path: z.string(),
 });
 
 // ---------------------------------------------------------------------------
@@ -74,19 +75,17 @@ export type ClassificationSource =
   | "default-fallback";
 
 export interface ClassificationResult {
-  // Existing fields kept for backward compatibility with finalNaming / routing.
-  readonly phase: (typeof PROJECT_PHASES)[number];
+  readonly trade: ProjectTrade | null;
   readonly folderHint: "Photos" | "Renders" | "Final";
   readonly description: string;
   readonly confidence: number;
   readonly classificationSource: ClassificationSource;
-  // New fields from the redesigned prompt.
-  /** Full filename suggested by the model — e.g. "KR_02242026_Office_FramingProgress.jpg". */
-  readonly suggestedFilename?: string;
   /** Model's routing verdict: auto_route = confident; manual_review = low confidence. */
   readonly action: "auto_route" | "manual_review";
   /** Model's own project opinion — may differ from resolveProject()'s result. */
   readonly classifierProject?: string | null;
+  /** Full target path returned by the model — e.g. "Poolhouse/Photos/Tile". */
+  readonly targetPath?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,65 +118,75 @@ function buildFallbackDescription(category: SupportedFileCategory): string {
   return "ProgressPhoto";
 }
 
-function detectPhaseFromText(input: string): (typeof PROJECT_PHASES)[number] {
+function detectTradeFromText(input: string): ProjectTrade {
   const text = input.toLowerCase();
-
-  if (
-    text.includes("demo") ||
-    text.includes("demolition") ||
-    text.includes("tear out") ||
-    text.includes("tear-out")
-  ) {
-    return "Demo";
-  }
-
-  if (
-    text.includes("frame") ||
-    text.includes("framing") ||
-    text.includes("stud") ||
-    text.includes("studs")
-  ) {
-    return "Framing";
-  }
 
   if (
     text.includes("electrical") ||
     text.includes("panel") ||
     text.includes("outlet") ||
-    text.includes("switch")
+    text.includes("conduit") ||
+    text.includes("wiring")
   ) {
     return "Electrical";
   }
 
-  // All other specific phases normalize to their nearest allowed value.
-  // Plumbing/HVAC/framing-stage work → Framing (rough-in stage)
   if (
     text.includes("plumbing") ||
     text.includes("drain") ||
     text.includes("supply line") ||
-    text.includes("hvac") ||
-    text.includes("duct") ||
-    text.includes("mechanical")
+    text.includes("valve") ||
+    text.includes("manifold")
   ) {
-    return "Framing";
+    return "Plumbing";
   }
 
-  // Tile prep, cement board, backer board → Finish (prep is part of finish stage)
+  if (
+    text.includes("hvac") ||
+    text.includes("duct") ||
+    text.includes("mechanical") ||
+    text.includes("vent")
+  ) {
+    return "HVAC";
+  }
+
   if (
     text.includes("tile") ||
     text.includes("cement board") ||
     text.includes("durock") ||
     text.includes("backer board") ||
+    text.includes("grout") ||
+    text.includes("waterproof")
+  ) {
+    return "Tile";
+  }
+
+  if (
     text.includes("paint") ||
     text.includes("cabinet") ||
     text.includes("flooring") ||
     text.includes("trim") ||
-    text.includes("fixture")
+    text.includes("fixture") ||
+    text.includes("finish")
   ) {
     return "Finish";
   }
 
-  return "Finish";
+  if (
+    text.includes("demo") ||
+    text.includes("demolition") ||
+    text.includes("tear out") ||
+    text.includes("tear-out") ||
+    text.includes("frame") ||
+    text.includes("framing") ||
+    text.includes("stud") ||
+    text.includes("studs") ||
+    text.includes("structural")
+  ) {
+    return "Structural";
+  }
+
+  return "General";
 }
 
 function detectFolderHintFromText(
@@ -222,7 +231,7 @@ function buildFallbackClassification(params: {
   ].join(" ");
 
   return {
-    phase: detectPhaseFromText(context),
+    trade: detectTradeFromText(context),
     folderHint: detectFolderHintFromText(context),
     description: buildFallbackDescription(params.category),
     confidence: 0.2,
@@ -240,29 +249,11 @@ function buildFallbackClassification(params: {
 // ---------------------------------------------------------------------------
 
 function assetTypeToFolderHint(
-  assetType: "Photos" | "Videos" | "Renders" | "Final" | "unknown",
+  assetType: "Photos" | "Videos" | "Renders" | "Final",
 ): "Photos" | "Renders" | "Final" {
   if (assetType === "Renders") return "Renders";
   if (assetType === "Final") return "Final";
   return "Photos"; // Videos and Photos both land in Photos/Videos dirs (category decides)
-}
-
-/**
- * Extract a description token from a suggested filename like
- * "KR_02242026_ContentStudio_FramingProgress.jpg".
- * Returns everything after the second underscore, minus the extension.
- * Falls back to rawFallback when parsing fails.
- */
-function descriptionFromSuggestedFilename(
-  suggested: string,
-  rawFallback: string,
-): string {
-  const base = suggested.replace(/\.[^.]+$/, ""); // strip extension
-  const parts = base.split("_");
-  // Format: Initials _ Date _ Location _ Description...
-  if (parts.length >= 4) return parts.slice(2).join("_"); // Location_Description
-  if (parts.length === 3) return parts[2] ?? rawFallback; // just Location
-  return rawFallback;
 }
 
 export async function classifyAttachment(params: {
@@ -327,26 +318,9 @@ export async function classifyAttachment(params: {
       },
     ];
 
-    const senderInitials = (() => {
-      const fn = params.originalFilename ?? "";
-      const parts = fn.split("_");
-      const first = parts[0] ?? "";
-      return parts.length >= 2 && /^[A-Z]{2}$/.test(first) ? first : "XX";
-    })();
-
-    const todayStr = (() => {
-      const d = new Date();
-      const mm = String(d.getMonth() + 1).padStart(2, "0");
-      const dd = String(d.getDate()).padStart(2, "0");
-      const yy = String(d.getFullYear()).slice(-2);
-      return `${mm}${dd}${yy}`;
-    })();
-
-    const ext = path.extname(params.originalFilename ?? params.filePath).toLowerCase() || (params.category === "video" ? ".mp4" : ".jpg");
-
     const systemPrompt = [
-      "You classify construction-site attachments for a file archiver.",
-      "Return valid JSON only. No markdown. No explanations.",
+      "You are a strict file classification engine for a construction media archive.",
+      "Return valid JSON only. No markdown. No explanations outside the JSON.",
       "",
       "═══════════════════════════════════════",
       "CLASSIFICATION RULES (follow strictly):",
@@ -356,36 +330,6 @@ export async function classifyAttachment(params: {
       "═══════════════════════════════════════",
       "AVAILABLE PROJECT FOLDERS (choose EXACTLY one, verbatim casing):",
       projectList,
-      "",
-      "FOLDER STRUCTURE:",
-      "  [Project]/Photos/[Phase]   — construction progress photos",
-      "  [Project]/Videos/[Phase]   — site walk videos",
-      "  [Project]/Renders          — 3D renders, concept visuals",
-      "  [Project]/Final            — portfolio / hero shots",
-      "",
-      "ALLOWED PHASES (for Photos and Videos only):",
-      "  Demo, Framing, Electrical, Finish",
-      "",
-      "FILE NAMING CONVENTION:",
-      "  [Initials]_[MMDDYY]_[Location]_[Description].[ext]",
-      "  Examples:",
-      "    KR_02242026_ContentStudio_FramingProgress.jpg",
-      "    ZN_02242026_Office_MaterialSamples.jpg",
-      "    DV_02242026_Greenhouse_SiteWalkVideo.mp4",
-      `  Use initials "${senderInitials}", date "${todayStr}", ext "${ext}".`,
-      "  Location = short place name (e.g. Office, Studio, Greenhouse).",
-      "  Description = short PascalCase label (e.g. FramingProgress, TileWork, SiteWalkVideo).",
-      "",
-      "RETURN strict JSON with exactly these keys:",
-      '  { "project": string, "asset_type": "Photos"|"Videos"|"Renders"|"Final"|"unknown",',
-      '    "phase": "Demo"|"Framing"|"Electrical"|"Finish"|null,',
-      '    "suggested_filename": string,',
-      '    "confidence": 0.0–1.0,',
-      '    "action": "auto_route"|"manual_review",',
-      '    "reason": string }',
-      "",
-      "Set action=manual_review when confidence < 0.6 or project is unclear.",
-      "ALWAYS return a phase for Photos/Videos. Use null for Renders/Final.",
     ].join("\n");
 
     // Generate preview if not already provided by the caller.
@@ -476,53 +420,30 @@ export async function classifyAttachment(params: {
 
     const rawText = response.output_text;
 
-    const parsedRaw = JSON.parse(rawText) as Record<string, unknown>;
-
-    // Normalize legacy/extended phase values the model might still return into
-    // the four canonical phases before Zod validation.
-    const PHASE_NORMALIZATION: Record<string, string> = {
-      TilePrep: "Finish",
-      Plumbing: "Framing",
-      HVAC: "Framing",
-      Site: "Framing",
-      General: "Finish",
-    };
-    if (typeof parsedRaw.phase === "string" && parsedRaw.phase in PHASE_NORMALIZATION) {
-      logger.info(
-        { originalPhase: parsedRaw.phase, normalizedPhase: PHASE_NORMALIZATION[parsedRaw.phase] },
-        "AI returned non-canonical phase — normalizing",
-      );
-      parsedRaw.phase = PHASE_NORMALIZATION[parsedRaw.phase];
-    }
-
-    const parsed: unknown = parsedRaw;
-    const raw = aiResponseSchema.parse(parsed);
+    const raw = aiResponseSchema.parse(JSON.parse(rawText) as unknown);
 
     // Normalize confidence: AI sometimes returns a percentage (90 → 0.9).
     let confidence = raw.confidence;
     if (confidence > 1 && confidence <= 100) confidence = confidence / 100;
     confidence = Math.min(1, Math.max(0, confidence));
 
-    // Map new schema → ClassificationResult interface.
-    // folderHint and description are derived for backward-compat with routing/naming.
     const folderHint = assetTypeToFolderHint(raw.asset_type);
-    const description = descriptionFromSuggestedFilename(
-      raw.suggested_filename,
-      buildFallbackDescription(params.category),
-    );
-    // Phase must always be a valid ProjectPhase for Photos/Videos; fall back to Finish.
-    const phase: ClassificationResult["phase"] =
-      raw.phase ?? detectPhaseFromText([params.messageText ?? "", params.originalFilename ?? ""].join(" "));
+    // trade must be non-null for Photos/Videos; fall back to text detection.
+    const trade: ProjectTrade | null =
+      raw.trade ??
+      (folderHint === "Photos"
+        ? detectTradeFromText([params.messageText ?? "", params.originalFilename ?? ""].join(" "))
+        : null);
 
     const result: ClassificationResult = {
-      phase,
+      trade,
       folderHint,
-      description,
+      description: buildFallbackDescription(params.category),
       confidence,
       classificationSource: "ai",
-      suggestedFilename: raw.suggested_filename,
       action: raw.action,
       classifierProject: raw.project,
+      targetPath: raw.target_path,
     };
 
     return result;

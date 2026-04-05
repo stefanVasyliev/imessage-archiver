@@ -50,7 +50,7 @@ const logEntrySchema = z.object({
   fileName: z.string(),
   relativePath: z.string(),
   rootFolder: z.enum(["Photos", "Videos", "Renders", "Final"]),
-  phase: z.enum(["Demo", "Framing", "Electrical", "Finish"]).optional(),
+  trade: z.enum(["Structural", "Electrical", "Plumbing", "HVAC", "Tile", "Finish", "General"]).optional(),
   category: z.enum(["image", "video", "pdf", "unknown"]),
   confidence: z.number(),
   isDuplicate: z.boolean(),

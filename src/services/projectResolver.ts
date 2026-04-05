@@ -29,7 +29,7 @@ export interface ProjectResolution {
   /** Optional hints returned by AI — used downstream for naming/routing. */
   readonly suggestedLocation?: string;
   readonly suggestedDescription?: string;
-  readonly suggestedPhase?: "Demo" | "Framing" | "Electrical" | "Finish";
+  readonly suggestedTrade?: "Structural" | "Electrical" | "Plumbing" | "HVAC" | "Tile" | "Finish" | "General";
 }
 
 // ---------------------------------------------------------------------------
@@ -259,8 +259,8 @@ const aiProjectSchema = z.object({
   reasoning: z.string(),
   suggestedLocation: z.string().optional(),
   suggestedDescription: z.string().optional(),
-  suggestedPhase: z
-    .enum(["Demo", "Framing", "Electrical", "Finish"])
+  suggestedTrade: z
+    .enum(["Structural", "Electrical", "Plumbing", "HVAC", "Tile", "Finish", "General"])
     .nullable()
     .optional(),
 });
@@ -331,7 +331,7 @@ async function inferProjectViaAI(params: {
     "  6. Return confidence as a decimal 0.0–1.0.",
     "  7. If you cannot identify the project with ≥ 0.6 confidence, return null.",
     "",
-    'Return strict JSON: { "projectName": string | null, "confidence": number, "reasoning": string, "suggestedLocation"?: string, "suggestedDescription"?: string, "suggestedPhase"?: "Demo" | "Framing" | "Electrical" | "Finish" | null }',
+    'Return strict JSON: { "projectName": string | null, "confidence": number, "reasoning": string, "suggestedLocation"?: string, "suggestedDescription"?: string, "suggestedTrade"?: "Structural" | "Electrical" | "Plumbing" | "HVAC" | "Tile" | "Finish" | "General" | null }',
   ].join("\n");
 
   const contextLines: string[] = [];
@@ -630,7 +630,7 @@ export async function resolveProject(params: {
           confidenceThreshold: AI_CONFIDENCE_THRESHOLD,
           meetsThreshold: ai.projectName !== null && ai.confidence >= AI_CONFIDENCE_THRESHOLD,
           reasoning: ai.reasoning,
-          suggestedPhase: ai.suggestedPhase ?? null,
+          suggestedTrade: ai.suggestedTrade ?? null,
           suggestedLocation: ai.suggestedLocation ?? null,
         },
         "AI project inference result",
@@ -651,8 +651,8 @@ export async function resolveProject(params: {
           ...(ai.suggestedDescription !== undefined
             ? { suggestedDescription: ai.suggestedDescription }
             : {}),
-          ...(ai.suggestedPhase != null
-            ? { suggestedPhase: ai.suggestedPhase }
+          ...(ai.suggestedTrade != null
+            ? { suggestedTrade: ai.suggestedTrade }
             : {}),
         };
       }

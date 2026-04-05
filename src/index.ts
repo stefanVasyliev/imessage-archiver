@@ -115,7 +115,7 @@ function isLikelyRender(
 
 function buildRenderClassification(): ClassificationResult {
   return {
-    phase: "Finish", // not used — Renders folder has no phase
+    trade: null, // Renders folder has no trade
     folderHint: "Renders",
     description: "Render",
     confidence: 0.9,
@@ -143,9 +143,9 @@ type RoutingResult = {
 async function resolveTargetDirectory(params: {
   projectName: string;
   rootFolder: string;
-  phaseFolder: string | undefined;
+  tradeFolder: string | undefined;
 }): Promise<RoutingResult> {
-  const { projectName, rootFolder, phaseFolder } = params;
+  const { projectName, rootFolder, tradeFolder } = params;
 
   // Unknown project → global ManualReview.
   if (projectName === MANUAL_REVIEW_PROJECT) {
@@ -207,7 +207,7 @@ async function resolveTargetDirectory(params: {
   );
 
   // No phase — route to rootFolder.
-  if (phaseFolder === undefined) {
+  if (tradeFolder === undefined) {
     logger.info(
       { projectName, rootFolder, rootDir, routingMode: "project" },
       "[routing] Phase unknown — routing to root folder",
@@ -216,7 +216,7 @@ async function resolveTargetDirectory(params: {
   }
 
   // Phase folder — auto-create if missing.
-  const phaseDir = path.join(rootDir, phaseFolder);
+  const phaseDir = path.join(rootDir, tradeFolder);
   if (!(await fs.pathExists(phaseDir))) {
     logger.info(
       { phaseDir },
@@ -225,7 +225,7 @@ async function resolveTargetDirectory(params: {
     await fs.ensureDir(phaseDir);
   }
   logger.info(
-    { operation: "resolveTargetDirectory", projectName, rootFolder, phaseFolder, phaseDir, routingMode: "project" },
+    { operation: "resolveTargetDirectory", projectName, rootFolder, tradeFolder, phaseDir, routingMode: "project" },
     "[routing] Routing to phase folder",
   );
   return { dir: phaseDir, routingMode: "project" };
@@ -917,7 +917,7 @@ async function processAttachment(
         confidence: resolution.confidence,
         needsManualReview: resolution.needsManualReview,
         reasoning: resolution.reasoning,
-        suggestedPhase: resolution.suggestedPhase ?? null,
+        suggestedTrade: resolution.suggestedTrade ?? null,
         suggestedLocation: resolution.suggestedLocation ?? null,
       },
       "Project resolution result",
@@ -1005,8 +1005,8 @@ async function processAttachment(
       ...(resolution.suggestedDescription !== undefined
         ? { suggestedDescription: resolution.suggestedDescription }
         : {}),
-      ...(resolution.suggestedPhase !== undefined
-        ? { suggestedPhase: resolution.suggestedPhase }
+      ...(resolution.suggestedTrade !== undefined
+        ? { suggestedTrade: resolution.suggestedTrade }
         : {}),
     });
 
@@ -1017,7 +1017,7 @@ async function processAttachment(
       category === "video" &&
       classification.confidence < VIDEO_CONFIDENCE_THRESHOLD
         ? undefined
-        : naming.phaseFolder;
+        : naming.tradeFolder;
 
     // Classifier action=manual_review means low confidence — escalate even if
     // the project resolver was confident.
@@ -1027,7 +1027,7 @@ async function processAttachment(
     const { dir: targetDirectory, routingMode } = await resolveTargetDirectory({
       projectName: classifierForcesManualReview ? MANUAL_REVIEW_PROJECT : projectName,
       rootFolder: naming.rootFolder,
-      phaseFolder: effectivePhase,
+      tradeFolder: effectivePhase,
     });
 
     // Detect silent degradation: project was resolved but filesystem routing fell back.
@@ -1131,8 +1131,8 @@ async function processAttachment(
         fileName: naming.fileName,
         relativePath: finalPath,
         rootFolder: naming.rootFolder,
-        ...(naming.phaseFolder !== undefined
-          ? { phase: naming.phaseFolder }
+        ...(naming.tradeFolder !== undefined
+          ? { phase: naming.tradeFolder }
           : {}),
         category,
         confidence: classification.confidence,

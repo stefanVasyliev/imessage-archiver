@@ -3,7 +3,7 @@ import type { ClassificationResult } from "../services/aiClassifier.js";
 import type { RawAttachmentRow } from "../services/pollMessages.js";
 import { appleMessageDateToDate } from "./date.js";
 import type { SupportedFileCategory } from "./fileType.js";
-import type { ProjectPhase } from "./projectFolders.js";
+import type { ProjectTrade } from "./projectFolders.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -11,7 +11,7 @@ import type { ProjectPhase } from "./projectFolders.js";
 
 export interface FinalNamingResult {
   readonly rootFolder: "Photos" | "Videos" | "Renders" | "Final";
-  readonly phaseFolder?: ProjectPhase;
+  readonly tradeFolder?: ProjectTrade;
   readonly fileName: string;
 }
 
@@ -135,15 +135,15 @@ function resolveRootFolder(
 }
 
 /**
- * Phase is only meaningful under Photos and Videos.
+ * Trade is only meaningful under Photos and Videos.
  * For Renders and Final the property must be absent (exactOptionalPropertyTypes).
  */
-function resolvePhaseFolder(
+function resolveTradeFolder(
   rootFolder: "Photos" | "Videos" | "Renders" | "Final",
   classification: ClassificationResult,
-): ProjectPhase | undefined {
+): ProjectTrade | undefined {
   if (rootFolder === "Photos" || rootFolder === "Videos") {
-    return classification.phase;
+    return classification.trade ?? undefined;
   }
   return undefined;
 }
@@ -165,7 +165,7 @@ export function buildFinalNaming(params: {
   originalPath: string;
   suggestedLocation?: string;
   suggestedDescription?: string;
-  suggestedPhase?: ProjectPhase;
+  suggestedTrade?: ProjectTrade;
 }): FinalNamingResult {
   const ext = path.extname(params.originalPath).toLowerCase();
 
@@ -197,21 +197,21 @@ export function buildFinalNaming(params: {
   fileName += ext;
 
   const rootFolder = resolveRootFolder(params.category, params.classification);
-  let phaseFolder = resolvePhaseFolder(rootFolder, params.classification);
+  let tradeFolder = resolveTradeFolder(rootFolder, params.classification);
 
-  // When the classifier fell back to text-based phase detection and the project
-  // resolver's AI returned a phase hint, prefer the resolver's hint.
+  // When the classifier fell back to text-based trade detection and the project
+  // resolver's AI returned a trade hint, prefer the resolver's hint.
   if (
-    phaseFolder !== undefined &&
+    tradeFolder !== undefined &&
     params.classification.classificationSource !== "ai" &&
-    params.suggestedPhase != null
+    params.suggestedTrade != null
   ) {
-    phaseFolder = params.suggestedPhase;
+    tradeFolder = params.suggestedTrade;
   }
 
   return {
     rootFolder,
-    ...(phaseFolder !== undefined ? { phaseFolder } : {}),
+    ...(tradeFolder !== undefined ? { tradeFolder } : {}),
     fileName,
   };
 }

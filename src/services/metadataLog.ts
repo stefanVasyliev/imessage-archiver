@@ -14,7 +14,7 @@ export interface ProcessedFileEvent {
   readonly fileName: string;
   readonly relativePath: string;
   readonly rootFolder: "Photos" | "Videos" | "Renders" | "Final";
-  readonly phase?: "Demo" | "Framing" | "Electrical" | "Finish" | undefined;
+  readonly trade?: "Structural" | "Electrical" | "Plumbing" | "HVAC" | "Tile" | "Finish" | "General" | undefined;
   readonly category: "image" | "video" | "pdf" | "unknown";
   readonly confidence: number;
   readonly isDuplicate: boolean;

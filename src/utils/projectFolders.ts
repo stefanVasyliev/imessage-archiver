@@ -2,14 +2,17 @@ import fs from "fs-extra";
 import * as path from "node:path";
 import { appPaths } from "./filePaths.js";
 
-export const PROJECT_PHASES = [
-  "Demo",
-  "Framing",
+export const PROJECT_TRADES = [
+  "Structural",
   "Electrical",
+  "Plumbing",
+  "HVAC",
+  "Tile",
   "Finish",
+  "General",
 ] as const;
 
-export type ProjectPhase = (typeof PROJECT_PHASES)[number];
+export type ProjectTrade = (typeof PROJECT_TRADES)[number];
 
 function cleanAlphaNumeric(value: string): string {
   return value.replace(/[^a-zA-Z0-9\s]/g, " ").trim();
@@ -44,8 +47,8 @@ export async function ensureProjectStructure(
   const projectRoot = path.join(appPaths.root, normalizedProjectName);
 
   const directories = [
-    ...PROJECT_PHASES.map((phase) => path.join(projectRoot, "Photos", phase)),
-    ...PROJECT_PHASES.map((phase) => path.join(projectRoot, "Videos", phase)),
+    ...PROJECT_TRADES.map((trade) => path.join(projectRoot, "Photos", trade)),
+    ...PROJECT_TRADES.map((trade) => path.join(projectRoot, "Videos", trade)),
     path.join(projectRoot, "Renders"),
     path.join(projectRoot, "Final"),
   ];
