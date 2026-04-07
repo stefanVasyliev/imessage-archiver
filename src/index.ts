@@ -1010,7 +1010,7 @@ async function processAttachment(
         : {}),
     });
 
-    // ---- Target directory (strict folder existence — no auto-creation) ----
+    // ---- Target directory resolution ----
 
     // Low-confidence video → drop trade subfolder, route to Videos/ root.
     const effectiveTrade =
@@ -1019,19 +1019,62 @@ async function processAttachment(
         ? undefined
         : naming.tradeFolder;
 
-    // Classifier action=manual_review means low confidence — escalate even if
-    // the project resolver was confident.
-    const classifierForcesManualReview =
+    // Classifier confidence is below threshold (action=manual_review).
+    const classifierLowConfidence =
       !renderDetected && classification.action === "manual_review";
 
+    // Only hard-escalate to ManualReview when BOTH the project resolver AND the
+    // classifier are unsure. When the project is known, always route to it —
+    // use [Project]/{Photos|Videos}/General as a safe fallback for low-confidence
+    // classifications rather than discarding the resolver's work.
+    const classifierForcesManualReview =
+      classifierLowConfidence && resolution.needsManualReview;
+
+    // Compute the actual routing coordinates:
+    //   • Project unresolved                    → MANUAL_REVIEW_PROJECT (unchanged)
+    //   • Project resolved + classifier confident → naming.rootFolder / effectiveTrade
+    //   • Project resolved + classifier unsure   → Photos (or Videos) / General
+    const routingProjectName = resolution.needsManualReview
+      ? MANUAL_REVIEW_PROJECT
+      : projectName;
+
+    const routingRootFolder: "Photos" | "Videos" | "Renders" | "Final" =
+      classifierLowConfidence && !resolution.needsManualReview
+        ? category === "video"
+          ? "Videos"
+          : "Photos"
+        : naming.rootFolder;
+
+    const routingTrade: typeof effectiveTrade =
+      classifierLowConfidence && !resolution.needsManualReview
+        ? "General"
+        : effectiveTrade;
+
+    if (classifierLowConfidence && !resolution.needsManualReview) {
+      logger.info(
+        {
+          operation: "routing:safe-fallback",
+          messageRowId: row.messageRowId,
+          attachmentRowId: row.attachmentRowId,
+          projectName,
+          category,
+          classificationSource: classification.classificationSource,
+          confidence: classification.confidence,
+          routingRootFolder,
+          routingTrade,
+        },
+        "[routing] Low-confidence classification — safe-routing to General subfolder instead of ManualReview",
+      );
+    }
+
     const { dir: targetDirectory, routingMode } = await resolveTargetDirectory({
-      projectName: classifierForcesManualReview ? MANUAL_REVIEW_PROJECT : projectName,
-      rootFolder: naming.rootFolder,
-      tradeFolder: effectiveTrade,
+      projectName: routingProjectName,
+      rootFolder: routingRootFolder,
+      tradeFolder: routingTrade,
     });
 
     // Detect silent degradation: project was resolved but filesystem routing fell back.
-    if (!resolution.needsManualReview && routingMode !== "project") {
+    if (!resolution.needsManualReview && !classifierForcesManualReview && routingMode !== "project") {
       logger.error(
         {
           operation: "resolveTargetDirectory",
@@ -1044,11 +1087,11 @@ async function processAttachment(
           resolutionConfidence: resolution.confidence,
           targetDirectory,
           routingMode,
-          rootFolder: naming.rootFolder,
-          effectiveTrade: effectiveTrade ?? null,
+          routingRootFolder,
+          routingTrade: routingTrade ?? null,
           originalFilename: row.attachmentFilename,
         },
-        "Project resolved but file routed to ManualReview at filesystem level — project folder or subfolder missing",
+        "Project resolved but file routed to ManualReview at filesystem level — project folder missing",
       );
     }
 
@@ -1130,9 +1173,11 @@ async function processAttachment(
           : {}),
         fileName: naming.fileName,
         relativePath: finalPath,
-        rootFolder: naming.rootFolder,
-        ...(naming.tradeFolder !== undefined
-          ? { trade: naming.tradeFolder }
+        // Record the folder coordinates the file was ACTUALLY routed to, not the
+        // raw naming result — they differ when the safe-fallback path is taken.
+        rootFolder: routingRootFolder,
+        ...(routingTrade !== undefined
+          ? { trade: routingTrade }
           : {}),
         category,
         confidence: classification.confidence,

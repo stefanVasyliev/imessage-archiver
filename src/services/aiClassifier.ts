@@ -334,7 +334,39 @@ export async function classifyAttachment(params: {
       ],
     });
 
-    const raw = aiResponseSchema.parse(JSON.parse(response.output_text) as unknown);
+    // Parse + normalize AI response before Zod validation.
+    // The model occasionally returns "image" instead of "photo", or omits reasoning.
+    // Normalizing here avoids a hard Zod throw and the expensive fallback path.
+    let rawJson: unknown;
+    try {
+      rawJson = JSON.parse(response.output_text) as unknown;
+    } catch {
+      throw new Error(`AI returned non-JSON: ${response.output_text.slice(0, 200)}`);
+    }
+
+    if (typeof rawJson === "object" && rawJson !== null) {
+      const obj = rawJson as Record<string, unknown>;
+      // "image" is not in the schema — normalize to canonical "photo".
+      if (obj.category === "image") obj.category = "photo";
+      // Inject reasoning when absent so Zod doesn't reject the whole response.
+      if (typeof obj.reasoning !== "string" || !obj.reasoning.trim()) {
+        obj.reasoning = "No reasoning provided by model";
+      }
+    }
+
+    const parseResult = aiResponseSchema.safeParse(rawJson);
+    if (!parseResult.success) {
+      logger.warn(
+        {
+          filePath: params.filePath,
+          issues: parseResult.error.issues,
+          rawJson,
+        },
+        "AI response failed schema validation — using fallback",
+      );
+      return fallback;
+    }
+    const raw = parseResult.data;
 
     // Normalize confidence: AI sometimes returns a percentage (90 → 0.9).
     let confidence = raw.confidence;
