@@ -47,7 +47,7 @@ const processedEntrySchema = z.object({
   fileName: z.string(),
   relativePath: z.string(),
   rootFolder: z.string(),
-  phase: z.string().optional(),
+  trade: z.string().optional(),
   category: z.string(),
   confidence: z.number(),
   isDuplicate: z.boolean(),

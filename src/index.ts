@@ -226,7 +226,7 @@ async function resolveTargetDirectory(params: {
   }
   logger.info(
     { operation: "resolveTargetDirectory", projectName, rootFolder, tradeFolder, phaseDir, routingMode: "project" },
-    "[routing] Routing to phase folder",
+    "[routing] Routing to trade folder",
   );
   return { dir: phaseDir, routingMode: "project" };
 }
@@ -1012,8 +1012,8 @@ async function processAttachment(
 
     // ---- Target directory (strict folder existence — no auto-creation) ----
 
-    // Low-confidence video → clear phase, route to Videos/ root folder.
-    const effectivePhase =
+    // Low-confidence video → drop trade subfolder, route to Videos/ root.
+    const effectiveTrade =
       category === "video" &&
       classification.confidence < VIDEO_CONFIDENCE_THRESHOLD
         ? undefined
@@ -1027,7 +1027,7 @@ async function processAttachment(
     const { dir: targetDirectory, routingMode } = await resolveTargetDirectory({
       projectName: classifierForcesManualReview ? MANUAL_REVIEW_PROJECT : projectName,
       rootFolder: naming.rootFolder,
-      tradeFolder: effectivePhase,
+      tradeFolder: effectiveTrade,
     });
 
     // Detect silent degradation: project was resolved but filesystem routing fell back.
@@ -1045,7 +1045,7 @@ async function processAttachment(
           targetDirectory,
           routingMode,
           rootFolder: naming.rootFolder,
-          effectivePhase: effectivePhase ?? null,
+          effectiveTrade: effectiveTrade ?? null,
           originalFilename: row.attachmentFilename,
         },
         "Project resolved but file routed to ManualReview at filesystem level — project folder or subfolder missing",
@@ -1132,7 +1132,7 @@ async function processAttachment(
         relativePath: finalPath,
         rootFolder: naming.rootFolder,
         ...(naming.tradeFolder !== undefined
-          ? { phase: naming.tradeFolder }
+          ? { trade: naming.tradeFolder }
           : {}),
         category,
         confidence: classification.confidence,

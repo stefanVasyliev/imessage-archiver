@@ -319,7 +319,7 @@ export function getDashboardHtml(port: number): string {
       <div class="table-wrap"><table id="files-table">
         <thead><tr>
           <th>Date</th><th>Sender</th><th>Project</th>
-          <th>Filename</th><th>Category</th><th>Folder / Phase</th>
+          <th>Filename</th><th>Category</th><th>Folder / Trade</th>
           <th>Confidence</th><th>Source</th>
         </tr></thead>
         <tbody id="files-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody>
@@ -528,7 +528,7 @@ export function getDashboardHtml(port: number): string {
         <td><strong>\${esc(f.projectName)}</strong></td>
         <td>\${esc(f.fileName)}</td>
         <td>\${badge(f.category, f.category)}</td>
-        <td>\${esc(f.rootFolder)}\${f.phase ? ' / ' + esc(f.phase) : ''}</td>
+        <td>\${esc(f.rootFolder)}\${f.trade ? ' / ' + esc(f.trade) : ''}</td>
         <td>\${conf(f.confidence)}</td>
         <td>\${badge(f.classificationSource, f.classificationSource)}</td>
       </tr>\`).join('');

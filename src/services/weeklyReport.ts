@@ -513,7 +513,7 @@ function buildFilesSection(files: readonly LogEntry[]): string {
           <th>Preview</th>
           <th>Final Filename</th>
           <th>Category</th>
-          <th>Folder / Phase</th>
+          <th>Folder / Trade</th>
           <th>Confidence</th>
           <th>AI Source</th>
           <th>Saved Path</th>
