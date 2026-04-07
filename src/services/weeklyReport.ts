@@ -492,7 +492,7 @@ function buildFilesSection(files: readonly LogEntry[]): string {
       <td>${renderPreviewCell(f)}</td>
       <td>${renderFilename(f)}</td>
       <td>${categoryBadge(f.category)}</td>
-      <td>${esc(f.rootFolder)}${f.phase ? ` / ${esc(f.phase)}` : ""}</td>
+      <td>${esc(f.rootFolder)}${f.trade ? ` / ${esc(f.trade)}` : ""}</td>
       <td>${confidence(f.confidence)}</td>
       <td>${sourceBadge(f.classificationSource)}</td>
       <td class="path">${esc(f.relativePath)}</td>
