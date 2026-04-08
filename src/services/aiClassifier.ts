@@ -65,29 +65,32 @@ export interface AiClassificationInput {
 }
 
 // ---------------------------------------------------------------------------
-// AI response schema  (7-field canonical output)
+// Raw AI response schema — matches classification-rules.md output contract
 // ---------------------------------------------------------------------------
 
-const AI_CATEGORY = z.enum(["photo", "video", "render", "final"]);
-type AiCategory = z.infer<typeof AI_CATEGORY>;
+// The rules file instructs the AI to use these capitalised asset_type values.
+const RAW_ASSET_TYPE = z.enum(["Photos", "Videos", "Renders", "Final"]);
 
-const AI_ROOT_FOLDER = z.enum(["Photos", "Renders", "Final"]);
-
-const aiResponseSchema = z.object({
-  /** AI-suggested project name from knownProjects list (optional). */
-  projectName:  z.string().nullable().optional(),
-  category:     AI_CATEGORY,
-  trade:        z.enum(PROJECT_TRADES),
-  /** 1–3 word PascalCase/underscore description for use in filename. */
-  description:  z.string().optional(),
-  /** Folder bucket — AI's hint, not the final rootFolder (Videos overrides this). */
-  rootFolder:   AI_ROOT_FOLDER.optional(),
-  /** 0.0–1.0 or 0–100; normalized after parse. */
-  confidence:   z.number(),
-  reasoning:    z.string(),
+const rawAiResponseSchema = z.object({
+  /** Matched project name from the known-projects list. */
+  project:     z.string().nullable().optional(),
+  /** Capitalised asset bucket — matches rules file `category` field. */
+  category:    RAW_ASSET_TYPE,
+  trade:       z.string().nullable().optional(),
+  /** PascalCase description for use in filename. */
+  description: z.string().optional(),
+  /** 0.0–1.0 or 0–100; normalised after parse. */
+  confidence:  z.number(),
+  action:      z.enum(["auto_route", "manual_review"]).optional(),
+  reason:      z.string().optional(),
+  target_path: z.string().optional(),
+  // Legacy / alternative field names the model may return
+  reasoning:   z.string().optional(),
+  projectName: z.string().nullable().optional(),
+  rootFolder:  z.enum(["Photos", "Videos", "Renders", "Final"]).optional(),
 });
 
-type AiRawOutput = z.infer<typeof aiResponseSchema>;
+type RawAiResult = z.infer<typeof rawAiResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -190,62 +193,118 @@ function buildFallbackClassification(params: {
 // Normalization helpers
 // ---------------------------------------------------------------------------
 
-function categoryToRootFolder(category: AiCategory): "Photos" | "Renders" | "Final" {
-  if (category === "render") return "Renders";
-  if (category === "final") return "Final";
-  return "Photos"; // photo + video both map to Photos; Videos dir is chosen by SupportedFileCategory
+function assetTypeToRootFolder(
+  assetType: "Photos" | "Videos" | "Renders" | "Final",
+): "Photos" | "Renders" | "Final" {
+  if (assetType === "Renders") return "Renders";
+  if (assetType === "Final") return "Final";
+  return "Photos"; // Photos + Videos both map to Photos; Videos dir is chosen by SupportedFileCategory
 }
 
 function deriveAction(confidence: number): "auto_route" | "manual_review" {
   return confidence >= 0.6 ? "auto_route" : "manual_review";
 }
 
+const VALID_TRADES = new Set<string>(PROJECT_TRADES);
+
+function coerceTrade(raw: string | null | undefined): ProjectTrade {
+  if (raw && VALID_TRADES.has(raw)) return raw as ProjectTrade;
+  return "General";
+}
+
 /**
- * Post-parse normalization applied to every valid AI response before it is
- * used to build a `ClassificationResult`.
+ * Maps the raw AI response (rules-file format) to the internal pipeline format.
  *
- * Responsibilities:
- * - Normalize confidence from percent (90) to fraction (0.9)
- * - Derive `rootFolder` from `category` when AI omitted it (single source of truth)
- * - Validate AI-suggested project name against knownProjects (discard if not recognized)
- * - Fill description fallback when AI omitted it
+ * Handles both the canonical rules-file schema (`project`, `category` as
+ * "Photos"|"Videos"|…, `reason`) and legacy/alternative field names the model
+ * may emit (`projectName`, `rootFolder`, `reasoning`).
+ *
+ * Never throws — recovers all fields with safe defaults.
  */
-function normalizeAiOutput(
-  raw: AiRawOutput,
-  category: SupportedFileCategory,
+export function normalizeAiResult(
+  raw: RawAiResult,
+  fileCategory: SupportedFileCategory,
   knownProjects: readonly string[],
 ): {
   confidence: number;
   rootFolder: "Photos" | "Renders" | "Final";
+  trade: ProjectTrade;
   description: string;
+  reasoning: string;
   suggestedProjectName: string | undefined;
 } {
   // 1. Confidence: normalize percent → fraction.
-  let confidence = raw.confidence;
+  let confidence = raw.confidence ?? 0;
   if (confidence > 1 && confidence <= 100) confidence = confidence / 100;
   confidence = Math.min(1, Math.max(0, confidence));
 
-  // 2. rootFolder: AI hint or derive from category.
-  //    AI-provided rootFolder is advisory; always re-derive for video (SupportedFileCategory wins in finalNaming).
-  const rootFolder: "Photos" | "Renders" | "Final" =
-    raw.rootFolder ?? categoryToRootFolder(raw.category);
+  // 2. rootFolder: derive from asset_type / category field.
+  //    Support both new rules-file field (`category` = "Photos"|…) and legacy `rootFolder`.
+  const assetType: "Photos" | "Videos" | "Renders" | "Final" =
+    raw.rootFolder ?? raw.category;
+  const rootFolder = assetTypeToRootFolder(assetType);
 
-  // 3. Description: use AI's value when it looks usable; otherwise fallback.
-  const rawDesc = raw.description?.trim() ?? "";
-  const description =
-    rawDesc.length > 0 && rawDesc.length <= 80
-      ? rawDesc
-      : buildFallbackDescription(category);
+  // 3. Trade: coerce to valid value; null → "General".
+  const trade = coerceTrade(raw.trade);
 
-  // 4. Project name: only pass through when it matches a known project (case-insensitive).
-  const rawProject = raw.projectName?.trim() ?? "";
+  // 4. Description: AI value → trade fallback → media fallback.
+  const rawDesc = (raw.description ?? "").trim();
+  let description: string;
+  if (rawDesc.length > 0 && rawDesc.length <= 80 && !isDescriptionJunk(rawDesc)) {
+    description = rawDesc;
+  } else if (trade !== "General") {
+    description = tradeToDescriptionFallback(trade);
+  } else {
+    description = mediaFallbackDescription(fileCategory, assetType);
+  }
+
+  // 5. Reasoning: `reason` (rules-file) → `reasoning` (legacy) → default.
+  const reasoning =
+    (raw.reason ?? raw.reasoning ?? "").trim() || "Recovered from AI response";
+
+  // 6. Project name: validate against knownProjects.
+  const rawProject = (raw.project ?? raw.projectName ?? "").trim();
   const lowerKnown = knownProjects.map((p) => p.toLowerCase());
   const suggestedProjectName =
     rawProject.length > 0 && lowerKnown.includes(rawProject.toLowerCase())
       ? rawProject
       : undefined;
 
-  return { confidence, rootFolder, description, suggestedProjectName };
+  return { confidence, rootFolder, trade, description, reasoning, suggestedProjectName };
+}
+
+// ---------------------------------------------------------------------------
+// Description helpers
+// ---------------------------------------------------------------------------
+
+const JUNK_PATTERNS = [
+  /^(img|mov|jpeg|jpg|png|heic|pdf|file|photo|video|work|attachment)s?$/i,
+  /^library$/i,
+  /^messages$/i,
+  /^attachments$/i,
+  /^(chat|msg|att)\d*/i,
+  /^\d{4,}$/,
+];
+
+function isDescriptionJunk(value: string): boolean {
+  const tokens = value.toLowerCase().split(/[\s_-]+/);
+  return tokens.every((t) => JUNK_PATTERNS.some((rx) => rx.test(t)));
+}
+
+function tradeToDescriptionFallback(trade: ProjectTrade): string {
+  if (trade === "Structural") return "Framing";
+  return trade; // Electrical, Plumbing, HVAC, Tile, Finish, General are self-describing
+}
+
+function mediaFallbackDescription(
+  fileCategory: SupportedFileCategory,
+  assetType: "Photos" | "Videos" | "Renders" | "Final",
+): string {
+  if (assetType === "Renders") return "ProjectRender";
+  if (assetType === "Final") return "FinalView";
+  if (fileCategory === "video") return "SiteVideo";
+  if (fileCategory === "pdf") return "Document";
+  return "ProgressPhoto";
 }
 
 // ---------------------------------------------------------------------------
@@ -367,43 +426,31 @@ export async function classifyAttachment(
       "Return STRICT JSON only. No markdown. No text outside the JSON.",
       "",
       "RETURN exactly:",
-      '{ "projectName": string|null, "category": "photo"|"video"|"render"|"final",',
-      '  "trade": "Structural"|"Electrical"|"Plumbing"|"HVAC"|"Tile"|"Finish"|"General",',
-      '  "description": "1-3 word PascalCase_underscore label for filename",',
-      '  "rootFolder": "Photos"|"Renders"|"Final",',
-      '  "confidence": 0.0-1.0, "reasoning": string }',
+      '{',
+      '  "project": "string or null",',
+      '  "category": "Photos" | "Videos" | "Renders" | "Final",',
+      '  "trade": "Structural" | "Electrical" | "Plumbing" | "HVAC" | "Tile" | "Finish" | "General" | null,',
+      '  "description": "PascalCase label for filename — no spaces, no underscores inside the phrase",',
+      '  "confidence": 0.0-1.0,',
+      '  "action": "auto_route" | "manual_review",',
+      '  "reason": "short explanation",',
+      '  "target_path": "Project/Category/Trade or Project/Renders or Project/Final"',
+      '}',
       "",
       `KNOWN PROJECTS (use exact spelling if you identify one): ${knownProjectsList}`,
       "",
-      "CONTEXT PRIORITY (highest to lowest):",
-      "  1. Project context",
-      "  2. Message context",
-      "  3. Filename",
-      "  4. Visual preview",
-      "",
       "FIELD RULES:",
-      "  projectName → exact name from KNOWN PROJECTS list if identifiable, otherwise null",
-      "  category    → photo | video | render | final (see rules below)",
-      "  trade       → dominant construction trade (see rules below)",
-      "  description → 1-3 words, PascalCase separated by underscores, e.g. Shower_Tile_Install",
-      "  rootFolder  → Photos for photo/video, Renders for render, Final for final",
-      "  confidence  → 0.9+ clear | 0.7-0.9 likely | 0.5-0.7 weak | <0.5 → use General/Photos",
-      "  reasoning   → brief explanation of classification decision",
-      "",
-      "CATEGORY RULES:",
-      "  render → 3D, CGI, concept, architectural visualization (NO real-world evidence)",
-      "  final  → polished, staged, presentation-ready (NO active construction evidence)",
-      "  video  → any video file",
-      "  photo  → real construction progress (default for images)",
-      "",
-      "TRADE RULES (choose EXACTLY ONE — dominant activity only):",
-      "  Structural → framing, demo, studs, rough shell, broad rough construction",
-      "  Electrical → wires, panels, conduit, electrical rough-in as MAIN subject",
-      "  Plumbing   → drains, supply lines, valves, manifolds as MAIN subject",
-      "  HVAC       → ducts, vents, air distribution as MAIN subject",
-      "  Tile       → tile, Durock/backer board, waterproofing, grout",
-      "  Finish     → paint, trim, cabinets, flooring, fixtures, completed interiors",
-      "  General    → mixed progress, no single trade clearly dominates",
+      "  project     → exact name from KNOWN PROJECTS list if identifiable, otherwise null",
+      "  category    → Photos | Videos | Renders | Final",
+      "  trade       → dominant construction trade for Photos/Videos; null for Renders/Final",
+      "  description → PascalCase, no spaces, no underscores inside phrase",
+      "                e.g. CeilingPanel, BathroomTileInstall, Framing, ProgressPhoto",
+      "                Priority: specific subject → trade fallback → media fallback",
+      "                Structural fallback: Framing",
+      "                Media fallbacks: ProgressPhoto / SiteVideo / ProjectRender / FinalView",
+      "  confidence  → 0.9+ clear | 0.75-0.89 likely | 0.6-0.74 uncertain | <0.6 weak",
+      "  action      → auto_route when project + category are clear; otherwise manual_review",
+      "  reason      → brief explanation of classification decision",
       "",
       "DOMAIN RULES (follow strictly):",
       classificationRules,
@@ -429,19 +476,24 @@ export async function classifyAttachment(
     }
 
     // ---- Pre-parse normalization ----
-    // Coerce known deviations before Zod validation to avoid hard failures.
+    // Coerce legacy field names before Zod validation to avoid hard failures.
 
     if (typeof rawJson === "object" && rawJson !== null) {
       const obj = rawJson as Record<string, unknown>;
-      // "image" is not in the schema — normalize to canonical "photo".
-      if (obj.category === "image") obj.category = "photo";
-      // Inject reasoning when absent so Zod doesn't reject the whole response.
-      if (typeof obj.reasoning !== "string" || !obj.reasoning.trim()) {
-        obj.reasoning = "No reasoning provided by model";
+      // Lowercase category values → capitalise to match rules-file schema.
+      const catMap: Record<string, string> = {
+        photo: "Photos", photos: "Photos",
+        video: "Videos", videos: "Videos",
+        render: "Renders", renders: "Renders",
+        final: "Final",
+        image: "Photos", // legacy alias
+      };
+      if (typeof obj.category === "string" && obj.category.toLowerCase() in catMap) {
+        obj.category = catMap[obj.category.toLowerCase()];
       }
     }
 
-    const parseResult = aiResponseSchema.safeParse(rawJson);
+    const parseResult = rawAiResponseSchema.safeParse(rawJson);
     if (!parseResult.success) {
       logger.warn(
         {
@@ -454,29 +506,27 @@ export async function classifyAttachment(
       return fallback;
     }
 
-    // ---- Post-parse normalization ----
+    // ---- Normalization: rules-file format → internal pipeline format ----
 
-    const { confidence, rootFolder, description, suggestedProjectName } =
-      normalizeAiOutput(parseResult.data, params.category, params.knownProjects);
-
-    const raw = parseResult.data;
+    const { confidence, rootFolder, trade: normalizedTrade, description, reasoning, suggestedProjectName } =
+      normalizeAiResult(parseResult.data, params.category, params.knownProjects);
 
     // For Renders/Final trade is irrelevant — set null. For Photos/Videos always populate.
     const trade: ProjectTrade | null =
-      rootFolder === "Photos" ? raw.trade : null;
+      rootFolder === "Photos" ? normalizedTrade : null;
 
     logger.info(
       {
         filePath: params.filePath,
-        category: raw.category,
-        trade: raw.trade,
+        rawCategory: parseResult.data.category,
+        trade: normalizedTrade,
         rootFolder,
         description,
         confidence,
         action: deriveAction(confidence),
         suggestedProjectName,
         hasPreview,
-        reasoning: raw.reasoning,
+        reasoning,
       },
       "AI classification result",
     );

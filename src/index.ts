@@ -1027,11 +1027,9 @@ async function processAttachment(
       category,
       classification,
       originalPath: extracted.destinationPath,
+      projectName,
       // Prefer resolver hints (AI-sourced) when available; fall back to message
       // metadata hints so generic filenames get enriched even without AI.
-      ...(resolution.suggestedLocation !== undefined
-        ? { suggestedLocation: resolution.suggestedLocation }
-        : {}),
       suggestedDescription: resolution.suggestedDescription ?? msgMeta.description,
       suggestedTrade: resolution.suggestedTrade ?? msgMeta.trade,
     });

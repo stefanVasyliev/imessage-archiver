@@ -85,58 +85,50 @@ function resolveDate(row: RawAttachmentRow): string {
 }
 
 // ---------------------------------------------------------------------------
-// Description normalization
+// Description normalization — produces PascalCase, no internal underscores
 // ---------------------------------------------------------------------------
 
-function normalizeWords(value: string): string[] {
-  return value
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[_-]+/g, " ")
-    .replace(/[^a-zA-Z0-9\s]/g, " ")
+const GARBAGE_PATTERNS: readonly RegExp[] = [
+  /^(img|mov|jpeg|jpg|png|heic|pdf|file|photo|video|work|attachment)s?$/i,
+  /^library$/i,
+  /^messages$/i,
+  /^attachments$/i,
+  /^(chat|msg|att)\d*/i,
+  /^\d{4,}$/,
+];
+
+function isGarbageToken(value: string): boolean {
+  return GARBAGE_PATTERNS.some((rx) => rx.test(value));
+}
+
+/**
+ * Converts any raw description string to PascalCase with no internal underscores.
+ *
+ * "ceiling panel"         → "CeilingPanel"
+ * "sound_panel"           → "SoundPanel"
+ * "Bathroom Tile Install"  → "BathroomTileInstall"
+ * "ShowerheadWallPatch"    → "ShowerheadWallPatch"
+ * "chat1644msg"            → null
+ */
+function normalizeDescriptionPascal(description: string | null): string | null {
+  if (!description) return null;
+
+  const words = description
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // split camelCase / PascalCase
+    .replace(/[_\-]+/g, " ")                 // underscores and dashes → spaces
+    .replace(/[^a-zA-Z0-9\s]/g, " ")         // strip remaining punctuation
     .trim()
     .split(/\s+/)
     .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+    .filter((w) => !isGarbageToken(w))
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+
+  return words.length > 0 ? words.join("") : null; // PascalCase, no separators
 }
 
-function isGarbageToken(value: string): boolean {
-  const lowered = value.toLowerCase();
-  return (
-    lowered.startsWith("chat") ||
-    lowered.startsWith("msg") ||
-    lowered.startsWith("att") ||
-    /\d{4,}/.test(lowered)
-  );
-}
-
-function normalizeDescription(description: string | null): string | null {
-  if (!description) return null;
-
-  const words = normalizeWords(description).filter(
-    (word) => !isGarbageToken(word),
-  );
-
-  return words.length > 0 ? words.join("_") : null;
-}
-
-// ---------------------------------------------------------------------------
-// Location + remainder split
-// ---------------------------------------------------------------------------
-
-function splitDescriptionParts(normalized: string): {
-  location: string;
-  remainder: string | null;
-} {
-  const underscoreIndex = normalized.indexOf("_");
-
-  if (underscoreIndex === -1) {
-    return { location: normalized, remainder: null };
-  }
-
-  return {
-    location: normalized.slice(0, underscoreIndex),
-    remainder: normalized.slice(underscoreIndex + 1),
-  };
+/** Strip non-alphanumeric characters from a project name for use in a filename segment. */
+function sanitizeProjectSegment(name: string): string {
+  return name.replace(/[^a-zA-Z0-9]/g, "");
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +160,17 @@ function resolveTradeFolder(
 const GENERIC_DESCRIPTIONS = new Set([
   "ProgressPhoto",
   "SiteWalkVideo",
+  "SiteVideo",
+  "ProjectRender",
+  "FinalView",
   "Document",
+  "Framing",
+  "Electrical",
+  "Plumbing",
+  "HVAC",
+  "Tile",
+  "Finish",
+  "General",
 ]);
 
 export function buildFinalNaming(params: {
@@ -176,7 +178,7 @@ export function buildFinalNaming(params: {
   category: SupportedFileCategory;
   classification: ClassificationResult;
   originalPath: string;
-  suggestedLocation?: string;
+  projectName: string;
   suggestedDescription?: string;
   suggestedTrade?: ProjectTrade;
 }): FinalNamingResult {
@@ -185,27 +187,20 @@ export function buildFinalNaming(params: {
   const initials = resolveInitials(params.row);
   const date = resolveDate(params.row);
 
+  // 1. Pick best raw description — prefer specific AI description over generic fallback.
   let rawDescription = params.classification.description;
-  if (GENERIC_DESCRIPTIONS.has(rawDescription)) {
-    const hints = [params.suggestedLocation, params.suggestedDescription]
-      .filter(Boolean)
-      .join(" ");
-    if (hints) rawDescription = hints;
+  if (GENERIC_DESCRIPTIONS.has(rawDescription) && params.suggestedDescription) {
+    rawDescription = params.suggestedDescription;
   }
 
-  const normalized = normalizeDescription(rawDescription);
+  // 2. Normalise to PascalCase, no internal underscores.
+  const description = normalizeDescriptionPascal(rawDescription) ?? rawDescription;
 
-  let fileName = `${initials}_${date}`;
-
-  if (normalized !== null) {
-    const { location, remainder } = splitDescriptionParts(normalized);
-    fileName += `_${location}`;
-    if (remainder !== null) {
-      fileName += `_${remainder}`;
-    }
-  }
-
-  fileName += ext;
+  // 3. Build filename: [Initials]_[Date]_[Project]_[Description].[ext]
+  const projectSegment = sanitizeProjectSegment(params.projectName);
+  const fileName = projectSegment.length > 0
+    ? `${initials}_${date}_${projectSegment}_${description}${ext}`
+    : `${initials}_${date}_${description}${ext}`;
 
   const rootFolder = resolveRootFolder(params.category, params.classification);
   let tradeFolder = resolveTradeFolder(rootFolder, params.classification);

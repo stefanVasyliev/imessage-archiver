@@ -3,10 +3,11 @@
 Classify exactly one incoming file for a construction archive.
 
 ## Return
-Return exact:
+Return exact JSON with these fields:
 - `project`
 - `category`
 - `trade`
+- `description`
 - `confidence`
 - `action`
 - `reason`
@@ -110,6 +111,34 @@ Use the DOMINANT activity only.
 - If no single trade clearly dominates, choose `General`
 - Dominant activity matters more than secondary objects
 
+## Description rules
+`description` is used directly in the output filename.
+
+Rules:
+- Must be PascalCase: capitalize the first letter of every word, no spaces
+- No underscores inside the description phrase
+- No path fragments, chat IDs, message IDs, attachment IDs
+- No generic tokens: IMG, MOV, File, Photo, Video, Work, Library, Messages, Attachments
+- Concise: 1-3 meaningful words maximum
+- Describe the dominant visible subject or activity
+
+Description priority:
+1. Specific subject from image or message context
+   Examples: CeilingPanel, SoundPanel, BathroomTileInstall, ShowerFraming
+2. If no specific subject, use trade-based fallback:
+   - Structural → Framing
+   - Electrical → Electrical
+   - Plumbing → Plumbing
+   - HVAC → HVAC
+   - Tile → Tile
+   - Finish → Finish
+   - General → General
+3. If trade is also unclear, use media fallback:
+   - Photos → ProgressPhoto
+   - Videos → SiteVideo
+   - Renders → ProjectRender
+   - Final → FinalView
+
 ## Decision rules
 Use `auto_route` only when project and classification are clear.
 Otherwise use `manual_review`.
@@ -131,9 +160,10 @@ Build `target_path` exactly as:
 Return JSON only:
 
 {
-  "project": "string",
+  "project": "string or null",
   "category": "Photos | Videos | Renders | Final",
   "trade": "Structural | Electrical | Plumbing | HVAC | Tile | Finish | General | null",
+  "description": "PascalCase string, no spaces, no underscores inside phrase",
   "confidence": 0.0,
   "action": "auto_route | manual_review",
   "reason": "short explanation",
