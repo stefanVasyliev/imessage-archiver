@@ -5,7 +5,7 @@ Classify exactly one incoming file for a construction archive.
 ## Return
 Return exact:
 - `project`
-- `asset_type`
+- `category`
 - `trade`
 - `confidence`
 - `action`
@@ -21,7 +21,7 @@ Use only:
 2. otherwise the single last meaningful text message immediately before the file
 If that message clearly matches one available project, use it.
 
-## Allowed asset_type
+## Allowed category
 - `Photos`
 - `Videos`
 - `Renders`
@@ -132,7 +132,7 @@ Return JSON only:
 
 {
   "project": "string",
-  "asset_type": "Photos | Videos | Renders | Final",
+  "category": "Photos | Videos | Renders | Final",
   "trade": "Structural | Electrical | Plumbing | HVAC | Tile | Finish | General | null",
   "confidence": 0.0,
   "action": "auto_route | manual_review",
