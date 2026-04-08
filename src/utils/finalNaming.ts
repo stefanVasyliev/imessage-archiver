@@ -16,6 +16,27 @@ export interface FinalNamingResult {
 }
 
 // ---------------------------------------------------------------------------
+// Sender initials mapping
+// ---------------------------------------------------------------------------
+
+const SENDER_INITIALS_MAP: Record<string, string> = {
+  "+12139135312": "SV",
+  "+12139135745": "OV",
+  "+15042566155": "ZN",
+  "+16462441090": "AG",
+  "+13013008338": "K",
+  "+17472724128": "KR",
+};
+
+function normalizeSenderKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizePhoneDigits(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
+// ---------------------------------------------------------------------------
 // Date / initials
 // ---------------------------------------------------------------------------
 
@@ -34,8 +55,28 @@ function resolveInitials(row: RawAttachmentRow): string {
   const source = row.handleId?.trim();
   if (!source) return "UK";
 
+  // 1. Exact match by raw value (email / phone / whatever is in handleId)
+  const exactMatch = SENDER_INITIALS_MAP[normalizeSenderKey(source)];
+  if (exactMatch) return exactMatch.toUpperCase();
+
+  // 2. Match by normalized phone digits
+  const sourceDigits = normalizePhoneDigits(source);
+  if (sourceDigits) {
+    for (const [key, initials] of Object.entries(SENDER_INITIALS_MAP)) {
+      if (normalizePhoneDigits(key) === sourceDigits) {
+        return initials.toUpperCase();
+      }
+    }
+  }
+
+  // 3. Fallback to letters from handleId if it contains a name/email-like value
   const letters = source.replace(/[^a-zA-Z]/g, "").toUpperCase();
-  return letters.length >= 2 ? letters.slice(0, 2) : "UK";
+  if (letters.length >= 2) {
+    return letters.slice(0, 2);
+  }
+
+  // 4. Final fallback for unknown phone numbers
+  return "UK";
 }
 
 function resolveDate(row: RawAttachmentRow): string {
@@ -47,15 +88,9 @@ function resolveDate(row: RawAttachmentRow): string {
 // Description normalization
 // ---------------------------------------------------------------------------
 
-/**
- * Splits a string into PascalCase words:
- *   "ShowerheadWallPatch" → ["Showerhead", "Wall", "Patch"]
- *   "Framing_progress"   → ["Framing", "Progress"]
- *   "chat1644msg-att"    → filtered out by isGarbageToken
- */
 function normalizeWords(value: string): string[] {
   return value
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // split camelCase
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/[_-]+/g, " ")
     .replace(/[^a-zA-Z0-9\s]/g, " ")
     .trim()
@@ -74,13 +109,6 @@ function isGarbageToken(value: string): boolean {
   );
 }
 
-/**
- * Normalizes a raw description string into underscore-separated PascalCase
- * tokens with garbage removed. Returns null if nothing useful remains.
- *
- * "ShowerheadWallPatch" → "Showerhead_Wall_Patch"
- * "chat1644msg"         → null
- */
 function normalizeDescription(description: string | null): string | null {
   if (!description) return null;
 
@@ -95,16 +123,6 @@ function normalizeDescription(description: string | null): string | null {
 // Location + remainder split
 // ---------------------------------------------------------------------------
 
-/**
- * Splits a normalized description into a location token (first word) and an
- * optional remainder (the rest).
- *
- * "Showerhead_Wall_Patch" → { location: "Showerhead", remainder: "Wall_Patch" }
- * "Framing"               → { location: "Framing",    remainder: null }
- *
- * Keeping these together eliminates the double-word bug that occurs when
- * location and the full description are derived independently.
- */
 function splitDescriptionParts(normalized: string): {
   location: string;
   remainder: string | null;
@@ -112,7 +130,6 @@ function splitDescriptionParts(normalized: string): {
   const underscoreIndex = normalized.indexOf("_");
 
   if (underscoreIndex === -1) {
-    // Single token — it is only the location; there is no remainder.
     return { location: normalized, remainder: null };
   }
 
@@ -134,10 +151,6 @@ function resolveRootFolder(
   return classification.rootFolder;
 }
 
-/**
- * Trade is only meaningful under Photos and Videos.
- * For Renders and Final the property must be absent (exactOptionalPropertyTypes).
- */
 function resolveTradeFolder(
   rootFolder: "Photos" | "Videos" | "Renders" | "Final",
   classification: ClassificationResult,
@@ -172,7 +185,6 @@ export function buildFinalNaming(params: {
   const initials = resolveInitials(params.row);
   const date = resolveDate(params.row);
 
-  // When the AI returns a generic description, enrich it with resolution hints.
   let rawDescription = params.classification.description;
   if (GENERIC_DESCRIPTIONS.has(rawDescription)) {
     const hints = [params.suggestedLocation, params.suggestedDescription]
@@ -183,7 +195,6 @@ export function buildFinalNaming(params: {
 
   const normalized = normalizeDescription(rawDescription);
 
-  // Build the [Initials]_[MMDDYY]_[Location]_[Description] segments.
   let fileName = `${initials}_${date}`;
 
   if (normalized !== null) {
@@ -199,8 +210,6 @@ export function buildFinalNaming(params: {
   const rootFolder = resolveRootFolder(params.category, params.classification);
   let tradeFolder = resolveTradeFolder(rootFolder, params.classification);
 
-  // When the classifier fell back to text-based trade detection and the project
-  // resolver's AI returned a trade hint, prefer the resolver's hint.
   if (
     tradeFolder !== undefined &&
     params.classification.classificationSource !== "ai" &&
