@@ -7,11 +7,6 @@ import { PROJECT_TRADES } from "../utils/projectFolders.js";
 import type { ProjectTrade } from "../utils/projectFolders.js";
 import type { SupportedFileCategory } from "../utils/fileType.js";
 import { logger } from "../utils/logger.js";
-import {
-  optimizeImageForAI,
-  extractVideoFrameForAI,
-  cleanupAiPreview,
-} from "./aiMediaPreview.js";
 
 // ---------------------------------------------------------------------------
 // Classification rules loader (domain rules injected into every request)
@@ -59,9 +54,6 @@ export interface AiClassificationInput {
   readonly chatHintText: string | null;
   readonly projectName: string | null;
   readonly knownProjects: readonly string[];
-  /** Pre-generated preview path. When provided the classifier reuses it and
-   * does NOT clean it up — the caller is responsible for cleanup. */
-  readonly previewPath?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -324,22 +316,24 @@ export async function classifyAttachment(
 
   const classificationRules = await loadClassificationRules();
 
-  let aiImagePath: string | null = params.previewPath ?? null;
-  const ownsPreview = params.previewPath === undefined;
-
   try {
     const openai = getClient();
 
-    // ---- Structured input payload ----
+    // ---- Structured text payload ----
 
     const recentMessages: string[] = [];
     if (params.chatHintText) recentMessages.push(params.chatHintText);
     if (params.messageText) recentMessages.push(params.messageText);
 
+    const canSendImage = params.category === "image" || params.category === "video";
+    const mimeType = params.category === "video" ? "video/mp4"
+      : params.category === "pdf" ? "application/pdf"
+      : "image/jpeg";
+
     const inputPayload = {
       filename: params.originalFilename ?? "unknown",
-      mimeType: params.category === "video" ? "video/mp4" : params.category === "pdf" ? "application/pdf" : "image/jpeg",
-      mediaType: params.category === "video" ? "video" : params.category === "image" ? "image" : "unknown",
+      mimeType,
+      mediaType: params.category === "video" ? "video" : params.category === "image" ? "image" : params.category,
       messageContext: {
         lastMessage: params.messageText ?? "",
         recentMessages,
@@ -351,67 +345,33 @@ export async function classifyAttachment(
         knownTrades: PROJECT_TRADES,
         projectType: "construction",
       },
-      hasPreview: false, // updated below after preview generation
     };
 
-    // ---- Generate preview ----
-
-    if (aiImagePath === null && params.category === "image") {
-      try {
-        const preview = await optimizeImageForAI({
-          inputPath: params.filePath,
-          tempDir: path.join(process.cwd(), ".tmp", "ai-previews"),
-          maxWidth: 1200,
-          maxHeight: 1200,
-          jpegQuality: 76,
-        });
-        aiImagePath = preview.previewPath;
-        const reductionPercent = preview.originalBytes > 0
-          ? (((preview.originalBytes - preview.previewBytes) / preview.originalBytes) * 100).toFixed(1)
-          : "0";
-        logger.info(
-          { filePath: params.filePath, previewPath: preview.previewPath, originalBytes: preview.originalBytes, previewBytes: preview.previewBytes, reductionPercent },
-          "Built optimized image preview for AI",
-        );
-      } catch (previewError: unknown) {
-        logger.warn({ error: previewError, filePath: params.filePath }, "Image preview failed — classifying without image");
-      }
-    }
-
-    if (aiImagePath === null && params.category === "video") {
-      try {
-        const frame = await extractVideoFrameForAI({
-          inputPath: params.filePath,
-          tempDir: path.join(process.cwd(), ".tmp", "ai-previews"),
-          width: 1280,
-          seekSeconds: 2,
-        });
-        aiImagePath = frame.framePath;
-        logger.info(
-          { filePath: params.filePath, framePath: frame.framePath, originalBytes: frame.originalBytes, frameBytes: frame.frameBytes },
-          "Extracted video frame for AI",
-        );
-      } catch (frameError: unknown) {
-        logger.warn({ error: frameError, filePath: params.filePath }, "Video frame extraction failed — classifying without image");
-      }
-    }
-
-    const hasPreview = aiImagePath !== null;
-    inputPayload.hasPreview = hasPreview;
-
-    // ---- Build user content ----
+    // ---- Send original file directly ----
 
     const userContent: UserContentItem[] = [
       { type: "input_text", text: JSON.stringify(inputPayload) },
     ];
 
-    if (aiImagePath !== null) {
-      const fileBuffer = await fs.readFile(aiImagePath);
-      userContent.push({
-        type: "input_image",
-        image_url: `data:image/jpeg;base64,${fileBuffer.toString("base64")}`,
-        detail: "auto",
-      });
+    if (canSendImage) {
+      try {
+        const stat = await fs.stat(params.filePath);
+        const fileBuffer = await fs.readFile(params.filePath);
+        logger.info(
+          { operation: "ai:sendOriginalFile", filePath: params.filePath, mimeType, sizeBytes: stat.size },
+          "[ai] sending original file",
+        );
+        userContent.push({
+          type: "input_image",
+          image_url: `data:image/jpeg;base64,${fileBuffer.toString("base64")}`,
+          detail: "auto",
+        });
+      } catch (readErr: unknown) {
+        logger.warn(
+          { error: readErr, filePath: params.filePath },
+          "[ai] could not read original file — classifying from text context only",
+        );
+      }
     }
 
     // ---- System prompt ----
@@ -525,7 +485,6 @@ export async function classifyAttachment(
         confidence,
         action: deriveAction(confidence),
         suggestedProjectName,
-        hasPreview,
         reasoning,
       },
       "AI classification result",
@@ -546,7 +505,5 @@ export async function classifyAttachment(
       "AI classification failed, using fallback",
     );
     return fallback;
-  } finally {
-    if (ownsPreview) await cleanupAiPreview(aiImagePath);
   }
 }

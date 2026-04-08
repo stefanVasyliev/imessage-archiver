@@ -9,11 +9,6 @@ import {
   classifyAttachment,
   type ClassificationResult,
 } from "./services/aiClassifier.js";
-import {
-  optimizeImageForAI,
-  extractVideoFrameForAI,
-  cleanupAiPreview,
-} from "./services/aiMediaPreview.js";
 import { moveToDirectory } from "./services/archiveFile.js";
 import { createActivityLog } from "./db/activityLog.js";
 import { createMessageLog } from "./db/messageLog.js";
@@ -710,58 +705,6 @@ async function processAttachment(
     row.attachmentFilename,
   );
 
-  // ---- Generate shared preview (image or video frame) ----
-  // Renders skip this — they go straight to [Project]/Renders without AI.
-  // The preview is passed to both the project resolver and the classifier so
-  // we only generate it once.
-
-  const previewTempDir = path.join(process.cwd(), ".tmp", "ai-previews");
-  let sharedPreviewPath: string | null = null;
-
-  if (!renderDetected) {
-    if (category === "image") {
-      try {
-        const preview = await optimizeImageForAI({
-          inputPath: extracted.destinationPath,
-          tempDir: previewTempDir,
-          maxWidth: 1200,
-          maxHeight: 1200,
-          jpegQuality: 76,
-        });
-        sharedPreviewPath = preview.previewPath;
-      } catch (err: unknown) {
-        logger.warn(
-          { error: err, filePath: extracted.destinationPath },
-          "Image preview generation failed — proceeding without preview",
-        );
-      }
-    } else if (category === "video") {
-      try {
-        const frame = await extractVideoFrameForAI({
-          inputPath: extracted.destinationPath,
-          tempDir: previewTempDir,
-          width: 1280,
-          seekSeconds: 2,
-        });
-        sharedPreviewPath = frame.framePath;
-        logger.info(
-          {
-            filePath: extracted.destinationPath,
-            framePath: sharedPreviewPath,
-            originalBytes: frame.originalBytes,
-            frameBytes: frame.frameBytes,
-          },
-          "Generated shared video frame preview",
-        );
-      } catch (err: unknown) {
-        logger.warn(
-          { error: err, filePath: extracted.destinationPath },
-          "Video frame extraction failed — proceeding without preview",
-        );
-      }
-    }
-  }
-
   // ---- DB context enrichment ----
   // Fetch sender's last meaningful text AND recent chat messages directly from
   // DB at processing time — guarantees context even when the in-memory store is
@@ -836,7 +779,6 @@ async function processAttachment(
           : null,
       combinedMessageText: combinedMessageText?.slice(0, 120) ?? null,
       category,
-      sharedPreviewPath,
     },
     "Context summary before project resolution",
   );
@@ -870,8 +812,6 @@ async function processAttachment(
         messageText: row.text?.slice(0, 120) ?? null,
         originalFilename: row.attachmentFilename,
         lastSenderMessage: lastSenderMessage?.slice(0, 120) ?? null,
-        hasPreviewImage: sharedPreviewPath !== null,
-        previewPath: sharedPreviewPath,
         knownProjectsCount: knownProjects.length,
       },
       "Calling resolveProject",
@@ -885,9 +825,6 @@ async function processAttachment(
       originalFilename: row.attachmentFilename,
       knownProjects,
       lastSenderMessage,
-      ...(sharedPreviewPath !== null
-        ? { previewImagePath: sharedPreviewPath }
-        : {}),
     });
 
     if (resolution.needsManualReview) {
@@ -990,10 +927,6 @@ async function processAttachment(
         projectName,
         knownProjects,
         chatHintText,
-        // Pass the shared preview — classifier will not clean it up.
-        ...(sharedPreviewPath !== null
-          ? { previewPath: sharedPreviewPath }
-          : {}),
       });
     }
 
@@ -1274,8 +1207,17 @@ async function processAttachment(
       fileName: naming.fileName,
       detail: `path=${finalPath} duplicate=${String(duplicate.isDuplicate)}`,
     });
-  } finally {
-    await cleanupAiPreview(sharedPreviewPath);
+  } catch (err: unknown) {
+    logger.error(
+      {
+        error: err,
+        messageRowId: row.messageRowId,
+        attachmentRowId: row.attachmentRowId,
+        filePath: extracted.destinationPath,
+      },
+      "Unhandled error in attachment processing",
+    );
+    throw err;
   }
 }
 
