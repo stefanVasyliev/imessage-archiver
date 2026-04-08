@@ -3,7 +3,10 @@
     "allow": [
       "Bash(npm run:*)",
       "Bash(npx tsc:*)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(git -C /Users/stefanvasyliev/GitHub/imessage-archiver ls-files)",
+      "Bash(git -C /Users/stefanvasyliev/GitHub/imessage-archiver status)",
+      "Bash(echo \"messageMetadata errors: $?\")"
     ]
   }
 }

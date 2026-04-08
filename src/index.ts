@@ -45,6 +45,7 @@ import {
   getReportPeriodStart,
 } from "./services/weeklyReport.js";
 import { buildFinalNaming } from "./utils/finalNaming.js";
+import { extractFileMetadata } from "./utils/messageMetadata.js";
 import { appleMessageDateToDate } from "./utils/date.js";
 import { getFileCategory } from "./utils/fileType.js";
 import { appPaths } from "./utils/filePaths.js";
@@ -116,7 +117,7 @@ function isLikelyRender(
 function buildRenderClassification(): ClassificationResult {
   return {
     trade: null, // Renders folder has no trade
-    folderHint: "Renders",
+    rootFolder: "Renders",
     description: "Render",
     confidence: 0.9,
     classificationSource: "default-fallback",
@@ -984,13 +985,36 @@ async function processAttachment(
         originalFilename: row.attachmentFilename,
         projectName,
         knownProjects,
-        ...(chatHintText !== null ? { chatHintText } : {}),
+        chatHintText,
         // Pass the shared preview — classifier will not clean it up.
         ...(sharedPreviewPath !== null
           ? { previewPath: sharedPreviewPath }
           : {}),
       });
     }
+
+    // ---- Message-based metadata extraction (pure TS, no AI) ----
+    // Runs after project resolution so we can cross-check against the resolved
+    // project. Its output fills naming hints when the AI classifier fell back
+    // to a generic description (ProgressPhoto / SiteWalkVideo).
+
+    const msgMeta = extractFileMetadata({
+      message: combinedMessageText ?? "",
+      knownProjects,
+      filename: row.attachmentFilename,
+    });
+
+    logger.debug(
+      {
+        operation: "extractFileMetadata",
+        messageRowId: row.messageRowId,
+        msgMetaProject: msgMeta.projectName,
+        msgMetaTrade: msgMeta.trade,
+        msgMetaDescription: msgMeta.description,
+        msgMetaConfidence: msgMeta.confidence,
+      },
+      "Message metadata extracted",
+    );
 
     // ---- Naming ----
 
@@ -999,15 +1023,13 @@ async function processAttachment(
       category,
       classification,
       originalPath: extracted.destinationPath,
+      // Prefer resolver hints (AI-sourced) when available; fall back to message
+      // metadata hints so generic filenames get enriched even without AI.
       ...(resolution.suggestedLocation !== undefined
         ? { suggestedLocation: resolution.suggestedLocation }
         : {}),
-      ...(resolution.suggestedDescription !== undefined
-        ? { suggestedDescription: resolution.suggestedDescription }
-        : {}),
-      ...(resolution.suggestedTrade !== undefined
-        ? { suggestedTrade: resolution.suggestedTrade }
-        : {}),
+      suggestedDescription: resolution.suggestedDescription ?? msgMeta.description,
+      suggestedTrade: resolution.suggestedTrade ?? msgMeta.trade,
     });
 
     // ---- Target directory resolution ----

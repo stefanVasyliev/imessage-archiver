@@ -131,7 +131,7 @@ function resolveRootFolder(
   classification: ClassificationResult,
 ): "Photos" | "Videos" | "Renders" | "Final" {
   if (category === "video") return "Videos";
-  return classification.folderHint;
+  return classification.rootFolder;
 }
 
 /**
