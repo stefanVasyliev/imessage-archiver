@@ -3,7 +3,7 @@ import fs from "fs-extra";
 import * as path from "node:path";
 import { env } from "./config/env.js";
 import type Database from "better-sqlite3";
-import { openChatDb, getCurrentMaxMessageRowId } from "./db/chatDb.js";
+import { openChatDb, getCurrentMaxMessageRowId, getChatGuid } from "./db/chatDb.js";
 import { readState, writeState, initializeStartupState } from "./db/stateStore.js";
 import {
   classifyAttachment,
@@ -45,6 +45,10 @@ import {
   getReportPeriodStart,
 } from "./services/weeklyReport.js";
 import { buildFinalNaming } from "./utils/finalNaming.js";
+import {
+  sendTestModeReport,
+  classificationToAiOutput,
+} from "./services/testModeReporter.js";
 import { extractFileMetadata } from "./utils/messageMetadata.js";
 import { appleMessageDateToDate } from "./utils/date.js";
 import { getFileCategory } from "./utils/fileType.js";
@@ -1179,6 +1183,42 @@ async function processAttachment(
       },
       "File moved successfully",
     );
+
+    // ---- Test mode: send per-file debug report back into the chat ----
+
+    if (env.TEST_MODE) {
+      const chatGuid = getChatGuid(db, row.chatId);
+      if (chatGuid !== null) {
+        const folderPath = path.relative(appPaths.root, targetDirectory);
+        void sendTestModeReport({
+          chatGuid,
+          report: {
+            originalFilename: row.attachmentFilename,
+            senderId,
+            projectName,
+            trade: routingTrade ?? classification.trade,
+            description: classification.description,
+            category,
+            folderPath: folderPath || targetDirectory,
+            finalFileName: naming.fileName,
+            aiInput: {
+              messageText: combinedMessageText,
+              originalFilename: row.attachmentFilename,
+              projectName,
+              chatHintText: contextStore.getChat(row.chatId)?.rawMessageText ?? null,
+            },
+            aiOutput: classificationToAiOutput(classification),
+            confidence: classification.confidence,
+            isDuplicate: duplicate.isDuplicate,
+          },
+        });
+      } else {
+        logger.warn(
+          { chatId: row.chatId, messageRowId: row.messageRowId },
+          "[TEST MODE] Could not resolve chat GUID — skipping debug message",
+        );
+      }
+    }
 
     // ---- Metadata log ----
 

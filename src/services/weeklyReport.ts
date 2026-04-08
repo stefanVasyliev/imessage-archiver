@@ -18,14 +18,12 @@ const reportLog = createReportLog(appPaths.reportLogFile);
 // To switch to production: set TEST_MODE = false.
 // ---------------------------------------------------------------------------
 
-export const TEST_MODE = false;
-
-export const CRON_SCHEDULE = TEST_MODE
+export const CRON_SCHEDULE = env.TEST_MODE
   ? "* * * * *" // every minute (test)
   : "0 6 * * 1"; // Mondays at 06:00 (production)
 
 export function getReportPeriodStart(): Date {
-  if (TEST_MODE) {
+  if (env.TEST_MODE) {
     return new Date(Date.now() - 18000 * 1000); // last 1 minute
   }
   const start = new Date();
@@ -50,7 +48,17 @@ const logEntrySchema = z.object({
   fileName: z.string(),
   relativePath: z.string(),
   rootFolder: z.enum(["Photos", "Videos", "Renders", "Final"]),
-  trade: z.enum(["Structural", "Electrical", "Plumbing", "HVAC", "Tile", "Finish", "General"]).optional(),
+  trade: z
+    .enum([
+      "Structural",
+      "Electrical",
+      "Plumbing",
+      "HVAC",
+      "Tile",
+      "Finish",
+      "General",
+    ])
+    .optional(),
   category: z.enum(["image", "video", "pdf", "unknown"]),
   confidence: z.number(),
   isDuplicate: z.boolean(),
@@ -618,7 +626,7 @@ function buildManualReviewSection(manualReview: readonly LogEntry[]): string {
 export function buildReportHtml(data: ReportData): string {
   const generatedStr = fmtDate(data.generatedAtIso);
   const periodStr = fmtDate(data.periodStartIso);
-  const modeLabel = TEST_MODE ? "[TEST]" : "Weekly";
+  const modeLabel = env.TEST_MODE ? "[TEST]" : "Weekly";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -704,7 +712,7 @@ export async function sendReportEmail(data: ReportData): Promise<void> {
   }
 
   const resend = new Resend(env.RESEND_API_KEY);
-  const modeLabel = TEST_MODE ? "[TEST]" : "Weekly";
+  const modeLabel = env.TEST_MODE ? "[TEST]" : "Weekly";
   const counts = [
     `${data.summary.unique} file${data.summary.unique !== 1 ? "s" : ""}`,
     ...(data.summary.duplicates > 0

@@ -49,3 +49,18 @@ export function getCurrentMaxMessageRowId(db: Database.Database): number {
     .get() as { maxRowId: number | null };
   return row.maxRowId ?? 0;
 }
+
+/**
+ * Returns the iMessage chat GUID for the given chat ROWID.
+ * The GUID is used by AppleScript to target the correct conversation.
+ * Returns null if the chat is not found.
+ */
+export function getChatGuid(
+  db: Database.Database,
+  chatId: number,
+): string | null {
+  const row = db
+    .prepare("SELECT guid FROM chat WHERE ROWID = ?")
+    .get(chatId) as { guid: string | null } | undefined;
+  return row?.guid ?? null;
+}
